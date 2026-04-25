@@ -1,0 +1,137 @@
+"""Lua script executor for darktable integration."""
+
+import subprocess
+import tempfile
+import logging
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+from ..utils.errors import DarktableLuaError, DarktableNotFoundError
+
+logger = logging.getLogger(__name__)
+
+
+class LuaExecutor:
+    """Executes Lua scripts in darktable safely."""
+
+    def __init__(self, darktable_path: Optional[str] = None):
+        """Initialize the Lua executor.
+
+        Args:
+            darktable_path: Path to darktable executable (auto-detect if None)
+        """
+        self.darktable_path = darktable_path or self._find_darktable()
+
+    def _find_darktable(self) -> str:
+        """Find darktable executable in system PATH.
+
+        Returns:
+            str: Path to darktable executable
+
+        Raises:
+            DarktableNotFoundError: If darktable is not found
+        """
+        import shutil
+
+        darktable_path = shutil.which("darktable")
+        if not darktable_path:
+            raise DarktableNotFoundError(
+                "darktable executable not found in PATH. Please install darktable."
+            )
+
+        return darktable_path
+
+    def execute_script(self, script_content: str, params: Dict[str, Any] = None) -> str:
+        """Execute a Lua script in darktable.
+
+        Args:
+            script_content: Lua script code to execute
+            params: Parameters to pass to the script
+
+        Returns:
+            str: Script output
+
+        Raises:
+            DarktableLuaError: If script execution fails
+        """
+        params = params or {}
+
+        # Create temporary script file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
+            # Add parameter injection
+            param_lua = self._generate_param_lua(params)
+            full_script = f"{param_lua}\n{script_content}"
+
+            f.write(full_script)
+            script_path = f.name
+
+        try:
+            # Execute via darktable --lua
+            result = subprocess.run(
+                [self.darktable_path, "--lua", script_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr or "Unknown error"
+                raise DarktableLuaError(f"Lua script execution failed: {error_msg}")
+
+            return result.stdout.strip()
+
+        except subprocess.TimeoutExpired:
+            raise DarktableLuaError("Lua script execution timed out")
+        except Exception as e:
+            raise DarktableLuaError(f"Failed to execute Lua script: {str(e)}")
+        finally:
+            # Clean up temporary file
+            try:
+                Path(script_path).unlink()
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temp script file: {e}")
+
+    def _generate_param_lua(self, params: Dict[str, Any]) -> str:
+        """Generate Lua code to inject parameters.
+
+        Args:
+            params: Parameters to inject
+
+        Returns:
+            str: Lua code for parameter injection
+        """
+        if not params:
+            return ""
+
+        lua_lines = ["-- Injected parameters"]
+        for key, value in params.items():
+            if isinstance(value, str):
+                lua_lines.append(f'{key} = "{value}"')
+            elif isinstance(value, (int, float)):
+                lua_lines.append(f'{key} = {value}')
+            elif isinstance(value, bool):
+                lua_lines.append(f'{key} = {str(value).lower()}')
+            elif isinstance(value, list):
+                # Convert list to Lua table
+                items = []
+                for item in value:
+                    if isinstance(item, str):
+                        items.append(f'"{item}"')
+                    else:
+                        items.append(str(item))
+                lua_lines.append(f'{key} = {{{", ".join(items)}}}')
+
+        return "\n".join(lua_lines)
+
+    def execute_script_file(self, script_path: Path, params: Dict[str, Any] = None) -> str:
+        """Execute a Lua script file.
+
+        Args:
+            script_path: Path to Lua script file
+            params: Parameters to pass to script
+
+        Returns:
+            str: Script output
+        """
+        script_content = script_path.read_text()
+        return self.execute_script(script_content, params)

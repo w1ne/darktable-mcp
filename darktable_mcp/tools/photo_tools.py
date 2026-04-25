@@ -156,3 +156,58 @@ class PhotoTools:
         '''
 
         return self.lua_executor.execute_script(script, params=params, headless=True)
+
+    def adjust_exposure(self, arguments: Dict[str, Any]) -> str:
+        """Adjust exposure for photos (requires GUI for preview).
+
+        Args:
+            arguments: Dictionary containing:
+                - photo_ids (list): List of photo IDs to adjust
+                - exposure_ev (float): Exposure adjustment in EV (-5.0 to 5.0)
+
+        Returns:
+            str: Status message with number of photos adjusted
+
+        Raises:
+            DarktableMCPError: If photo_ids missing, empty, or exposure_ev invalid
+        """
+        photo_ids = arguments.get("photo_ids", [])
+        exposure_ev = arguments.get("exposure_ev", 0.0)
+
+        if not photo_ids:
+            raise DarktableMCPError("photo_ids is required")
+
+        if not -5.0 <= exposure_ev <= 5.0:
+            raise DarktableMCPError("exposure_ev must be between -5.0 and 5.0")
+
+        # Parameters passed safely to Lua script
+        params = {
+            "photo_ids": photo_ids,
+            "exposure_ev": exposure_ev,
+        }
+
+        script = '''
+        local adjusted_count = 0
+
+        -- Process each photo
+        for _, photo_id in ipairs(photo_ids) do
+            local image = dt.database[tonumber(photo_id)]
+            if image then
+                -- Apply exposure adjustment
+                if image.modules and image.modules.exposure then
+                    image.modules.exposure.exposure = image.modules.exposure.exposure + exposure_ev
+                    adjusted_count = adjusted_count + 1
+                end
+            end
+        end
+
+        print("Adjusted exposure for " .. adjusted_count .. " photos by " .. exposure_ev .. " EV")
+        '''
+
+        # Use GUI mode since user needs to see the adjustments
+        return self.lua_executor.execute_script(
+            script,
+            params=params,
+            headless=False,
+            gui_purpose="Show exposure adjustment preview"
+        )

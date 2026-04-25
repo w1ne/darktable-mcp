@@ -1,6 +1,6 @@
 """Tests for PhotoTools module."""
 
-from unittest.mock import patch, Mock
+from unittest.mock import patch, Mock, ANY
 import pytest
 
 from darktable_mcp.tools.photo_tools import PhotoTools
@@ -185,3 +185,81 @@ class TestPhotoToolsImportBatch:
 
             assert "Imported 2 photos" in result
             mock_executor.execute_script.assert_called_once()
+
+
+class TestPhotoToolsAdjustExposure:
+    """Test cases for PhotoTools.adjust_exposure()"""
+
+    def test_adjust_exposure_basic(self):
+        """Test basic adjust_exposure functionality."""
+        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+            mock_executor = MockExecutor.return_value
+            mock_executor.execute_script.return_value = 'Adjusted exposure for 2 photos'
+
+            tools = PhotoTools()
+            result = tools.adjust_exposure({
+                "photo_ids": ["123", "456"],
+                "exposure_ev": 1.5
+            })
+
+            assert "Adjusted exposure" in result
+            # Verify GUI mode was used (headless=False)
+            mock_executor.execute_script.assert_called_once()
+            call_kwargs = mock_executor.execute_script.call_args[1]
+            assert call_kwargs["headless"] is False
+            assert call_kwargs["gui_purpose"] == "Show exposure adjustment preview"
+
+    def test_adjust_exposure_validation_too_high(self):
+        """Test adjust_exposure raises error for exposure > 5.0."""
+        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+            tools = PhotoTools()
+            with pytest.raises(DarktableMCPError) as exc_info:
+                tools.adjust_exposure({"photo_ids": ["123"], "exposure_ev": 6.0})
+
+            assert "exposure_ev must be between" in str(exc_info.value)
+
+    def test_adjust_exposure_validation_too_low(self):
+        """Test adjust_exposure raises error for exposure < -5.0."""
+        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+            tools = PhotoTools()
+            with pytest.raises(DarktableMCPError) as exc_info:
+                tools.adjust_exposure({"photo_ids": ["123"], "exposure_ev": -6.0})
+
+            assert "exposure_ev must be between" in str(exc_info.value)
+
+    def test_adjust_exposure_missing_photo_ids(self):
+        """Test adjust_exposure raises error when photo_ids missing."""
+        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+            tools = PhotoTools()
+            with pytest.raises(DarktableMCPError) as exc_info:
+                tools.adjust_exposure({"exposure_ev": 1.0})
+
+            assert "photo_ids is required" in str(exc_info.value)
+
+    def test_adjust_exposure_single_photo(self):
+        """Test adjust_exposure with a single photo."""
+        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+            mock_executor = MockExecutor.return_value
+            mock_executor.execute_script.return_value = 'Adjusted exposure for 1 photos by 2.0 EV'
+
+            tools = PhotoTools()
+            result = tools.adjust_exposure({"photo_ids": ["999"], "exposure_ev": 2.0})
+
+            assert "Adjusted exposure" in result
+            mock_executor.execute_script.assert_called_once()
+
+    def test_adjust_exposure_boundary_values(self):
+        """Test adjust_exposure with boundary exposure values."""
+        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+            mock_executor = MockExecutor.return_value
+            mock_executor.execute_script.return_value = 'Adjusted exposure for 1 photos by 5.0 EV'
+
+            tools = PhotoTools()
+            # Test max value
+            result = tools.adjust_exposure({"photo_ids": ["123"], "exposure_ev": 5.0})
+            assert "Adjusted exposure" in result
+
+            # Test min value
+            mock_executor.execute_script.return_value = 'Adjusted exposure for 1 photos by -5.0 EV'
+            result = tools.adjust_exposure({"photo_ids": ["123"], "exposure_ev": -5.0})
+            assert "Adjusted exposure" in result

@@ -2,14 +2,32 @@
 
 A Model Context Protocol (MCP) server that exposes a small set of darktable
 operations to MCP clients (e.g. Claude Desktop, Claude Code). The AI lives in
-the client; this server drives darktable through its provided APIs:
-`darktable-cli` for export and the official Lua API for library reads.
+the client; this server drives darktable.
 
 ## Status
 
 Early alpha. `view_photos` and `export_images` are wired through to real
 darktable; the remaining tools are registered but return a "not yet
 implemented" message.
+
+## Design rule: headless by default, GUI only to show the human something
+
+Tools whose purpose is to **return data to the AI client** must be headless.
+Launching the darktable GUI for a query is a non-starter: it's slow,
+single-instance, and disruptive to the user. So:
+
+- **Headless paths used here:**
+  - `darktable-cli` for export.
+  - Read-only SQLite reads of `library.db` (via SQLite URI `mode=ro`) for
+    library queries. `darktable-cli` cannot browse the user's library, and
+    `darktable --lua` brings up the GUI — so the DB read is the only
+    headless option for browsing.
+- **GUI is only acceptable** when the tool's explicit purpose is to *show*
+  the human user something in darktable's editor. No such tool exists yet.
+  When one is added, it should be the only tool that spawns the GUI.
+- **Writes to the library** must go through darktable's official APIs
+  (Lua, or a future long-running plugin with an IPC channel). Do not write
+  to `library.db`.
 
 ## Installation
 
@@ -38,12 +56,15 @@ Add to your Claude Desktop config:
 }
 ```
 
+If your `library.db` is in a non-standard location, set `DARKTABLE_LIBRARY`
+to its absolute path.
+
 ## Implemented tools
 
-- `view_photos(filter?, rating_min?, limit?)` — runs a Lua script against
-  darktable's `darktable.database` and returns id, rating (-1 = rejected,
-  0–5 = stars), and absolute path per row. The filter is a substring match
-  against the full image path.
+- `view_photos(filter?, rating_min?, limit?)` — reads darktable's
+  `library.db` read-only and returns id, rating (-1 = rejected, 0–5 =
+  stars), and absolute path per row. Filter is a substring match against
+  folder or filename.
 - `export_images(photo_ids, output_path, format, quality?)` — exports each
   source file via `darktable-cli` to the given output directory.
 
@@ -68,9 +89,7 @@ with the resulting file paths.
 ## Contributing
 
 Contributions welcome. Adding a real implementation for any of the stubbed
-tools is the most useful place to start. Stick to the provided APIs:
-`darktable-cli` for export and the Lua API for everything else — do not read
-or write `library.db` directly.
+tools is the most useful place to start. Follow the design rule above.
 
 ## License
 

@@ -1,270 +1,197 @@
 """Main MCP server for darktable integration."""
 
-import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.types import TextContent, Tool
 
+from .darktable.cli_wrapper import CLIWrapper
 from .utils.errors import DarktableMCPError
 
 logger = logging.getLogger(__name__)
+
+ToolHandler = Callable[[Dict[str, Any]], Awaitable[List[TextContent]]]
 
 
 class DarktableMCPServer:
     """MCP server for darktable photo management and editing."""
 
-    def __init__(self):
-        """Initialize the darktable MCP server."""
-        self.app = Server("darktable-mcp")
+    def __init__(self) -> None:
+        self.app: Server = Server("darktable-mcp")
+        self._cli: Optional[CLIWrapper] = None
+        self._handler_map: Dict[str, ToolHandler] = self._build_handlers()
         self._setup_tools()
 
-    def _setup_tools(self) -> None:
-        """Register all available tools with the MCP server."""
+    @property
+    def cli(self) -> CLIWrapper:
+        if self._cli is None:
+            self._cli = CLIWrapper()
+        return self._cli
 
+    def _setup_tools(self) -> None:
         @self.app.list_tools()
         async def list_tools() -> List[Tool]:
-            """List all available darktable tools."""
-            return [
-                Tool(
-                    name="view_photos",
-                    description="Browse photo library with optional filters",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "filter": {
-                                "type": "string",
-                                "description": "Filter criteria (e.g., 'landscape', 'portrait')"
-                            },
-                            "rating_min": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": 5,
-                                "description": "Minimum star rating"
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "description": "Maximum number of photos to return"
-                            }
-                        }
-                    }
-                ),
-                Tool(
-                    name="rate_photos",
-                    description="Apply star ratings to photos",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "photo_ids": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "List of photo IDs to rate"
-                            },
-                            "rating": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": 5,
-                                "description": "Star rating (1-5)"
-                            },
-                            "filter": {
-                                "type": "string",
-                                "description": "Filter criteria to select photos"
-                            }
-                        },
-                        "required": ["rating"]
-                    }
-                ),
-                Tool(
-                    name="import_batch",
-                    description="Import photos from directories",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "source_path": {
-                                "type": "string",
-                                "description": "Source directory path"
-                            },
-                            "recursive": {
-                                "type": "boolean",
-                                "description": "Search subdirectories recursively"
-                            },
-                            "copy": {
-                                "type": "boolean",
-                                "description": "Copy files vs. reference in place"
-                            }
-                        },
-                        "required": ["source_path"]
-                    }
-                ),
-                Tool(
-                    name="adjust_exposure",
-                    description="Adjust exposure settings for photos",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "photo_ids": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "List of photo IDs to adjust"
-                            },
-                            "exposure_ev": {
-                                "type": "number",
-                                "minimum": -5.0,
-                                "maximum": 5.0,
-                                "description": "Exposure adjustment in EV stops"
-                            },
-                            "filter": {
-                                "type": "string",
-                                "description": "Filter criteria to select photos"
-                            }
-                        },
-                        "required": ["exposure_ev"]
-                    }
-                ),
-                Tool(
-                    name="apply_preset",
-                    description="Apply editing presets to photos",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "photo_ids": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "List of photo IDs"
-                            },
-                            "preset_name": {
-                                "type": "string",
-                                "description": "Name of preset to apply"
-                            },
-                            "filter": {
-                                "type": "string",
-                                "description": "Filter criteria to select photos"
-                            }
-                        },
-                        "required": ["preset_name"]
-                    }
-                ),
-                Tool(
-                    name="export_images",
-                    description="Export photos to various formats",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "photo_ids": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "List of photo IDs to export"
-                            },
-                            "output_path": {
-                                "type": "string",
-                                "description": "Output directory path"
-                            },
-                            "format": {
-                                "type": "string",
-                                "enum": ["jpeg", "png", "tiff"],
-                                "description": "Export format"
-                            },
-                            "quality": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": 100,
-                                "description": "Export quality (1-100)"
-                            }
-                        },
-                        "required": ["output_path", "format"]
-                    }
-                )
-            ]
+            return self._tool_definitions()
 
         @self.app.call_tool()
         async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
-            """Handle tool calls."""
+            handler = self._handler_map.get(name)
+            if handler is None:
+                return [TextContent(type="text", text=f"Unknown tool: {name}")]
             try:
-                if name == "view_photos":
-                    return await self._handle_view_photos(arguments)
-                elif name == "rate_photos":
-                    return await self._handle_rate_photos(arguments)
-                elif name == "import_batch":
-                    return await self._handle_import_batch(arguments)
-                elif name == "adjust_exposure":
-                    return await self._handle_adjust_exposure(arguments)
-                elif name == "apply_preset":
-                    return await self._handle_apply_preset(arguments)
-                elif name == "export_images":
-                    return await self._handle_export_images(arguments)
-                else:
-                    return [TextContent(
-                        type="text",
-                        text=f"Unknown tool: {name}"
-                    )]
-
+                return await handler(arguments)
+            except DarktableMCPError as e:
+                logger.error("Tool %s failed: %s", name, e)
+                return [TextContent(type="text", text=f"Error: {e}")]
             except Exception as e:
-                logger.error(f"Tool {name} failed: {e}")
-                return [TextContent(
-                    type="text",
-                    text=f"Tool {name} failed: {str(e)}"
-                )]
+                logger.exception("Tool %s crashed", name)
+                return [TextContent(type="text", text=f"Tool {name} crashed: {e}")]
 
-    def list_tools(self) -> List[str]:
-        """Get list of available tool names."""
+    def _tool_definitions(self) -> List[Tool]:
         return [
-            "view_photos",
-            "rate_photos",
-            "import_batch",
-            "adjust_exposure",
-            "apply_preset",
-            "export_images"
+            Tool(
+                name="view_photos",
+                description="Browse photo library with optional filters (not yet implemented)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "filter": {"type": "string", "description": "Filter criteria"},
+                        "rating_min": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "limit": {"type": "integer"},
+                    },
+                },
+            ),
+            Tool(
+                name="rate_photos",
+                description="Apply star ratings to photos (not yet implemented)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "photo_ids": {"type": "array", "items": {"type": "string"}},
+                        "rating": {"type": "integer", "minimum": 1, "maximum": 5},
+                        "filter": {"type": "string"},
+                    },
+                    "required": ["rating"],
+                },
+            ),
+            Tool(
+                name="import_batch",
+                description="Import photos from directories (not yet implemented)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "source_path": {"type": "string"},
+                        "recursive": {"type": "boolean"},
+                        "copy": {"type": "boolean"},
+                    },
+                    "required": ["source_path"],
+                },
+            ),
+            Tool(
+                name="adjust_exposure",
+                description="Adjust exposure settings for photos (not yet implemented)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "photo_ids": {"type": "array", "items": {"type": "string"}},
+                        "exposure_ev": {"type": "number", "minimum": -5.0, "maximum": 5.0},
+                        "filter": {"type": "string"},
+                    },
+                    "required": ["exposure_ev"],
+                },
+            ),
+            Tool(
+                name="apply_preset",
+                description="Apply editing presets to photos (not yet implemented)",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "photo_ids": {"type": "array", "items": {"type": "string"}},
+                        "preset_name": {"type": "string"},
+                        "filter": {"type": "string"},
+                    },
+                    "required": ["preset_name"],
+                },
+            ),
+            Tool(
+                name="export_images",
+                description=(
+                    "Export photos to JPEG/PNG/TIFF via darktable-cli. "
+                    "Pass absolute file paths in photo_ids."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "photo_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Absolute paths to source images",
+                        },
+                        "output_path": {"type": "string"},
+                        "format": {"type": "string", "enum": ["jpeg", "png", "tiff"]},
+                        "quality": {"type": "integer", "minimum": 1, "maximum": 100},
+                    },
+                    "required": ["photo_ids", "output_path", "format"],
+                },
+            ),
         ]
 
-    async def _handle_view_photos(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle view_photos tool call."""
-        return [TextContent(
-            type="text",
-            text="view_photos tool called - implementation pending"
-        )]
+    def _build_handlers(self) -> Dict[str, ToolHandler]:
+        return {
+            "view_photos": self._not_implemented("view_photos"),
+            "rate_photos": self._not_implemented("rate_photos"),
+            "import_batch": self._not_implemented("import_batch"),
+            "adjust_exposure": self._not_implemented("adjust_exposure"),
+            "apply_preset": self._not_implemented("apply_preset"),
+            "export_images": self._handle_export_images,
+        }
 
-    async def _handle_rate_photos(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle rate_photos tool call."""
-        return [TextContent(
-            type="text",
-            text="rate_photos tool called - implementation pending"
-        )]
+    def list_tools(self) -> List[str]:
+        """Tool names registered with the server (used by tests/introspection)."""
+        return list(self._handler_map.keys())
 
-    async def _handle_import_batch(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle import_batch tool call."""
-        return [TextContent(
-            type="text",
-            text="import_batch tool called - implementation pending"
-        )]
-
-    async def _handle_adjust_exposure(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle adjust_exposure tool call."""
-        return [TextContent(
-            type="text",
-            text="adjust_exposure tool called - implementation pending"
-        )]
-
-    async def _handle_apply_preset(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle apply_preset tool call."""
-        return [TextContent(
-            type="text",
-            text="apply_preset tool called - implementation pending"
-        )]
+    @staticmethod
+    def _not_implemented(name: str) -> ToolHandler:
+        async def handler(_: Dict[str, Any]) -> List[TextContent]:
+            return [TextContent(
+                type="text",
+                text=f"{name} is not yet implemented. Currently only export_images is wired.",
+            )]
+        return handler
 
     async def _handle_export_images(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        """Handle export_images tool call."""
-        return [TextContent(
-            type="text",
-            text="export_images tool called - implementation pending"
-        )]
+        photo_ids = arguments.get("photo_ids") or []
+        output_path = arguments.get("output_path")
+        format_type = arguments.get("format", "jpeg")
+        quality = int(arguments.get("quality", 95))
+
+        if not output_path:
+            return [TextContent(type="text", text="output_path is required")]
+        if not photo_ids:
+            return [TextContent(type="text", text="photo_ids must contain at least one path")]
+
+        input_files = [Path(p) for p in photo_ids]
+        results = self.cli.batch_export(
+            input_files=input_files,
+            output_dir=Path(output_path),
+            format_type=format_type,
+            quality=quality,
+        )
+        body = "\n".join(f"{src}: {status}" for src, status in results.items())
+        return [TextContent(type="text", text=body or "No files processed")]
 
     async def start(self) -> None:
-        """Start the MCP server via stdio."""
-        await stdio_server(self.app)
+        """Run the MCP server over stdio."""
+        async with stdio_server() as (read_stream, write_stream):
+            await self.app.run(
+                read_stream,
+                write_stream,
+                self.app.create_initialization_options(),
+            )
 
-    async def run(self, host: str = "localhost", port: int = 3000) -> None:
-        """Run the MCP server."""
-        logger.info(f"Starting Darktable MCP Server on {host}:{port}")
+    async def run(self) -> None:
+        logger.info("Starting Darktable MCP Server (stdio)")
         await self.start()

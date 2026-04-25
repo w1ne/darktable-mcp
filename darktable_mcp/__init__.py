@@ -1,9 +1,8 @@
 """Darktable MCP Server - Model Context Protocol server for darktable integration."""
 
-import sys
 import asyncio
 import logging
-from typing import Optional
+import sys
 
 from .server import DarktableMCPServer
 
@@ -15,45 +14,28 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
-    """Main entry point for the darktable MCP server."""
+    """Main entry point for the darktable MCP server (stdio transport)."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Darktable MCP Server")
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=3000,
-        help="Port to run the server on (default: 3000)"
-    )
-    parser.add_argument(
-        "--host",
-        type=str,
-        default="localhost",
-        help="Host to bind to (default: localhost)"
-    )
+    parser = argparse.ArgumentParser(description="Darktable MCP Server (stdio)")
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug logging"
+        help="Enable debug logging",
     )
-
     args = parser.parse_args()
 
-    # Configure logging
-    level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(
-        level=level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    # Run server
     try:
-        server = DarktableMCPServer()
-        asyncio.run(server.run(host=args.host, port=args.port))
+        asyncio.run(DarktableMCPServer().run())
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
     except Exception as e:
-        logger.error(f"Server error: {e}")
+        logger.error("Server error: %s", e)
         sys.exit(1)
 
 

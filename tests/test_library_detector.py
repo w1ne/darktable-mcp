@@ -1,7 +1,7 @@
 """Tests for darktable library path detection."""
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from pathlib import Path
 
 from darktable_mcp.darktable.library_detector import LibraryDetector
@@ -71,11 +71,6 @@ class TestLibraryDetector:
         """Test that find_library returns the first existing library path."""
         with patch('pathlib.Path.home') as mock_home:
             mock_home.return_value = Path('/home/user')
-
-            def exists_side_effect():
-                # Simulate that only macOS path exists (for testing)
-                # This won't work with our simple implementation, but tests the logic
-                return True
 
             with patch.object(Path, 'exists', return_value=True):
                 detector = LibraryDetector()

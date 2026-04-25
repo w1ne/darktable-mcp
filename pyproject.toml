@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "darktable-mcp"
-version = "0.1.0"
-description = "MCP server for darktable photo management and editing"
+version = "1.0.0"
+description = "MCP server for darktable photo management with headless library operations"
 authors = [{name = "w1ne", email = "14119286+w1ne@users.noreply.github.com"}]
 license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.8"
 keywords = ["darktable", "mcp", "model-context-protocol", "photo-editing", "photography"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",

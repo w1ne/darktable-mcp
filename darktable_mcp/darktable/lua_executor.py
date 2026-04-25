@@ -1,10 +1,10 @@
 """Lua script executor for darktable integration."""
 
+import logging
 import subprocess
 import tempfile
-import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 from ..utils.errors import DarktableLuaError, DarktableNotFoundError
 
@@ -46,7 +46,7 @@ class LuaExecutor:
         script_content: str,
         params: Dict[str, Any] = None,
         headless: bool = True,
-        gui_purpose: Optional[str] = None
+        gui_purpose: Optional[str] = None,
     ) -> str:
         """Execute a Lua script in appropriate mode.
 
@@ -90,16 +90,13 @@ class LuaExecutor:
 
         # Inject library path and parameters into script
         param_lua = self._generate_param_lua(params)
-        script_with_setup = f'''dt = require("darktable")("--library", "{library_path}")
+        script_with_setup = f"""dt = require("darktable")("--library", "{library_path}")
 {param_lua}
-{script_content}'''
+{script_content}"""
 
         try:
             result = subprocess.run(
-                ['lua', '-e', script_with_setup],
-                capture_output=True,
-                text=True,
-                timeout=30
+                ["lua", "-e", script_with_setup], capture_output=True, text=True, timeout=30
             )
 
             if result.returncode != 0:
@@ -132,7 +129,7 @@ class LuaExecutor:
         params = params or {}
 
         # Create temporary script file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.lua', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".lua", delete=False) as f:
             # Add parameter injection
             param_lua = self._generate_param_lua(params)
             full_script = f"{param_lua}\n{script_content}"
@@ -146,7 +143,7 @@ class LuaExecutor:
                 [self.darktable_path, "--lua", script_path],
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
             )
 
             if result.returncode != 0:
@@ -183,9 +180,9 @@ class LuaExecutor:
             if isinstance(value, str):
                 lua_lines.append(f'{key} = "{value}"')
             elif isinstance(value, (int, float)):
-                lua_lines.append(f'{key} = {value}')
+                lua_lines.append(f"{key} = {value}")
             elif isinstance(value, bool):
-                lua_lines.append(f'{key} = {str(value).lower()}')
+                lua_lines.append(f"{key} = {str(value).lower()}")
             elif isinstance(value, list):
                 # Convert list to Lua table
                 items = []

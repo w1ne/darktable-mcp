@@ -9,6 +9,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from .darktable.cli_wrapper import CLIWrapper
+from .tools.photo_tools import PhotoTools
 from .utils.errors import DarktableMCPError
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ class DarktableMCPServer:
     def __init__(self) -> None:
         self.app: Server = Server("darktable-mcp")
         self._cli: Optional[CLIWrapper] = None
+        self._photo_tools: Optional[PhotoTools] = None
         self._handler_map: Dict[str, ToolHandler] = self._build_handlers()
         self._setup_tools()
 
@@ -30,6 +32,12 @@ class DarktableMCPServer:
         if self._cli is None:
             self._cli = CLIWrapper()
         return self._cli
+
+    @property
+    def photo_tools(self) -> PhotoTools:
+        if self._photo_tools is None:
+            self._photo_tools = PhotoTools()
+        return self._photo_tools
 
     def _setup_tools(self) -> None:
         @self.app.list_tools()
@@ -54,56 +62,50 @@ class DarktableMCPServer:
         return [
             Tool(
                 name="view_photos",
-                description=(
-                    "Browse darktable's library (not yet implemented — "
-                    "awaiting a long-running Lua plugin with IPC; see README)."
-                ),
+                description="Browse photos in your darktable library with filtering and rating options",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "filter": {"type": "string"},
-                        "rating_min": {"type": "integer", "minimum": 1, "maximum": 5},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                        "filter": {"type": "string", "description": "Filter photos by filename"},
+                        "rating_min": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Minimum star rating"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100, "description": "Maximum number of photos to return"},
                     },
                 },
             ),
             Tool(
                 name="rate_photos",
-                description="Apply star ratings to photos (not yet implemented)",
+                description="Apply star ratings to photos in your darktable library",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "photo_ids": {"type": "array", "items": {"type": "string"}},
-                        "rating": {"type": "integer", "minimum": 1, "maximum": 5},
-                        "filter": {"type": "string"},
+                        "photo_ids": {"type": "array", "items": {"type": "string"}, "description": "List of photo IDs to rate"},
+                        "rating": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Star rating to apply"},
                     },
-                    "required": ["rating"],
+                    "required": ["photo_ids", "rating"],
                 },
             ),
             Tool(
                 name="import_batch",
-                description="Import photos from directories (not yet implemented)",
+                description="Import photos from directories into darktable library",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "source_path": {"type": "string"},
-                        "recursive": {"type": "boolean"},
-                        "copy": {"type": "boolean"},
+                        "source_path": {"type": "string", "description": "Path to directory containing photos"},
+                        "recursive": {"type": "boolean", "default": False, "description": "Import from subdirectories"},
                     },
                     "required": ["source_path"],
                 },
             ),
             Tool(
                 name="adjust_exposure",
-                description="Adjust exposure settings for photos (not yet implemented)",
+                description="Adjust exposure settings for photos (opens darktable GUI for preview)",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "photo_ids": {"type": "array", "items": {"type": "string"}},
-                        "exposure_ev": {"type": "number", "minimum": -5.0, "maximum": 5.0},
-                        "filter": {"type": "string"},
+                        "photo_ids": {"type": "array", "items": {"type": "string"}, "description": "List of photo IDs to adjust"},
+                        "exposure_ev": {"type": "number", "minimum": -5.0, "maximum": 5.0, "description": "Exposure adjustment in EV"},
                     },
-                    "required": ["exposure_ev"],
+                    "required": ["photo_ids", "exposure_ev"],
                 },
             ),
             Tool(
@@ -144,10 +146,10 @@ class DarktableMCPServer:
 
     def _build_handlers(self) -> Dict[str, ToolHandler]:
         return {
-            "view_photos": self._not_implemented("view_photos"),
-            "rate_photos": self._not_implemented("rate_photos"),
-            "import_batch": self._not_implemented("import_batch"),
-            "adjust_exposure": self._not_implemented("adjust_exposure"),
+            "view_photos": self._handle_view_photos,
+            "rate_photos": self._handle_rate_photos,
+            "import_batch": self._handle_import_batch,
+            "adjust_exposure": self._handle_adjust_exposure,
             "apply_preset": self._not_implemented("apply_preset"),
             "export_images": self._handle_export_images,
         }
@@ -164,6 +166,49 @@ class DarktableMCPServer:
                 text=f"{name} is not yet implemented.",
             )]
         return handler
+
+    async def _handle_view_photos(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        try:
+            photos = self.photo_tools.view_photos(arguments)
+            if not photos:
+                return [TextContent(type="text", text="No photos found matching criteria")]
+
+            # Format results nicely
+            result_lines = [f"Found {len(photos)} photos:"]
+            for photo in photos:
+                rating_stars = "⭐" * photo.get("rating", 0)
+                result_lines.append(
+                    f"ID: {photo['id']} | {photo['filename']} | Rating: {rating_stars}"
+                )
+
+            return [TextContent(type="text", text="\n".join(result_lines))]
+        except Exception as e:
+            logger.error("view_photos failed: %s", e)
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    async def _handle_rate_photos(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        try:
+            result = self.photo_tools.rate_photos(arguments)
+            return [TextContent(type="text", text=result)]
+        except Exception as e:
+            logger.error("rate_photos failed: %s", e)
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    async def _handle_import_batch(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        try:
+            result = self.photo_tools.import_batch(arguments)
+            return [TextContent(type="text", text=result)]
+        except Exception as e:
+            logger.error("import_batch failed: %s", e)
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    async def _handle_adjust_exposure(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        try:
+            result = self.photo_tools.adjust_exposure(arguments)
+            return [TextContent(type="text", text=result)]
+        except Exception as e:
+            logger.error("adjust_exposure failed: %s", e)
+            return [TextContent(type="text", text=f"Error: {e}")]
 
     async def _handle_export_images(self, arguments: Dict[str, Any]) -> List[TextContent]:
         photo_ids = arguments.get("photo_ids") or []

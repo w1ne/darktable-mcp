@@ -1,15 +1,38 @@
 # Darktable MCP Server
 
 A Model Context Protocol (MCP) server that exposes a small set of darktable
-operations to MCP clients (e.g. Claude Desktop, Claude Code). The AI lives in
-the client; this server drives darktable through its provided APIs:
-`darktable-cli` for export and the official Lua API for library reads.
+operations to MCP clients (e.g. Claude Desktop, Claude Code). The AI lives
+in the client; this server drives darktable.
 
 ## Status
 
-Early alpha. `view_photos` and `export_images` are wired through to real
-darktable; the remaining tools are registered but return a "not yet
-implemented" message.
+Early alpha. Only `export_images` is implemented today. Other tools are
+registered for shape but return "not yet implemented". See the design
+rules below for why — these aren't TODOs, they're parked until the right
+integration lands.
+
+## Design rules (no compromise)
+
+1. **Use the provided darktable APIs only.** `darktable-cli` for export;
+   the official Lua API for everything else. Do not read or write
+   `library.db` directly under any circumstances.
+2. **Tools that return data to the AI must be headless.** Spawning the
+   darktable GUI to answer a query is unacceptable.
+3. **GUI is only acceptable when the tool's purpose is to show the human
+   user something** in the darktable editor. No such tool exists yet.
+   When one is added, it is the only thing that may launch the GUI.
+
+### Why some tools are parked
+
+`darktable-cli` deliberately does not load the user's library, so it
+cannot browse it. `darktable --lua` brings up the full GUI. That means
+there is no headless, official-API path today for library reads or
+writes. The honest answer is to not ship those tools yet.
+
+The planned unblocker is a long-running darktable instance running a Lua
+plugin that exposes a small RPC (e.g. unix socket); the MCP server talks
+to that plugin. That keeps every rule above intact — official API,
+headless after the user already has darktable open, no DB poking.
 
 ## Installation
 
@@ -17,8 +40,8 @@ implemented" message.
 pip install darktable-mcp
 ```
 
-You also need `darktable` (with `darktable-cli`) installed and available on
-your `PATH`.
+You also need `darktable` (with `darktable-cli`) installed and available
+on your `PATH`.
 
 ## Configuration
 
@@ -40,24 +63,13 @@ Add to your Claude Desktop config:
 
 ## Implemented tools
 
-- `view_photos(filter?, rating_min?, limit?)` — runs a Lua script against
-  darktable's `darktable.database` and returns id, rating (-1 = rejected,
-  0–5 = stars), and absolute path per row. The filter is a substring match
-  against the full image path.
 - `export_images(photo_ids, output_path, format, quality?)` — exports each
   source file via `darktable-cli` to the given output directory.
 
 ## Stubbed tools (registered, not implemented)
 
-- `rate_photos`, `import_batch`, `adjust_exposure`, `apply_preset`
-
-## Usage example
-
-> "Show me my 4-star photos from the 2025 folder, then export them as JPEGs
-> at quality 90 into ~/exports."
-
-The AI client calls `view_photos` to find candidates, then `export_images`
-with the resulting file paths.
+- `view_photos`, `rate_photos`, `import_batch`, `adjust_exposure`,
+  `apply_preset`. All blocked on the long-running-plugin work above.
 
 ## Requirements
 
@@ -67,10 +79,9 @@ with the resulting file paths.
 
 ## Contributing
 
-Contributions welcome. Adding a real implementation for any of the stubbed
-tools is the most useful place to start. Stick to the provided APIs:
-`darktable-cli` for export and the Lua API for everything else — do not read
-or write `library.db` directly.
+Contributions welcome. The most useful starting point is the long-running
+Lua-plugin + IPC integration that unblocks every parked tool. Any change
+that reads or writes `library.db` directly will be rejected.
 
 ## License
 

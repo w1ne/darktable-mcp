@@ -9,30 +9,11 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from .darktable.cli_wrapper import CLIWrapper
-from .darktable.lua_executor import LuaExecutor
 from .utils.errors import DarktableMCPError
 
 logger = logging.getLogger(__name__)
 
 ToolHandler = Callable[[Dict[str, Any]], Awaitable[List[TextContent]]]
-
-
-_VIEW_PHOTOS_LUA = r"""
-local dt = require("darktable")
-local count = 0
-for _, img in ipairs(dt.database) do
-  if count >= limit then break end
-  local r = img.rating
-  local pass_rating = (rating_min < 0) or (r >= rating_min)
-  local full = img.path .. "/" .. img.filename
-  local pass_filter = (filter_text == "")
-      or (string.find(full, filter_text, 1, true) ~= nil)
-  if pass_rating and pass_filter then
-    print(img.id .. "\t" .. r .. "\t" .. full)
-    count = count + 1
-  end
-end
-"""
 
 
 class DarktableMCPServer:
@@ -41,7 +22,6 @@ class DarktableMCPServer:
     def __init__(self) -> None:
         self.app: Server = Server("darktable-mcp")
         self._cli: Optional[CLIWrapper] = None
-        self._lua: Optional[LuaExecutor] = None
         self._handler_map: Dict[str, ToolHandler] = self._build_handlers()
         self._setup_tools()
 
@@ -50,12 +30,6 @@ class DarktableMCPServer:
         if self._cli is None:
             self._cli = CLIWrapper()
         return self._cli
-
-    @property
-    def lua(self) -> LuaExecutor:
-        if self._lua is None:
-            self._lua = LuaExecutor()
-        return self._lua
 
     def _setup_tools(self) -> None:
         @self.app.list_tools()
@@ -81,16 +55,13 @@ class DarktableMCPServer:
             Tool(
                 name="view_photos",
                 description=(
-                    "Browse darktable's library via the official Lua API. "
-                    "Returns id, rating (-1 = rejected, 0–5 = stars), and path."
+                    "Browse darktable's library (not yet implemented — "
+                    "awaiting a long-running Lua plugin with IPC; see README)."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "filter": {
-                            "type": "string",
-                            "description": "Substring matched against full image path",
-                        },
+                        "filter": {"type": "string"},
                         "rating_min": {"type": "integer", "minimum": 1, "maximum": 5},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
                     },
@@ -173,7 +144,7 @@ class DarktableMCPServer:
 
     def _build_handlers(self) -> Dict[str, ToolHandler]:
         return {
-            "view_photos": self._handle_view_photos,
+            "view_photos": self._not_implemented("view_photos"),
             "rate_photos": self._not_implemented("rate_photos"),
             "import_batch": self._not_implemented("import_batch"),
             "adjust_exposure": self._not_implemented("adjust_exposure"),
@@ -193,38 +164,6 @@ class DarktableMCPServer:
                 text=f"{name} is not yet implemented.",
             )]
         return handler
-
-    async def _handle_view_photos(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        rating_min = arguments.get("rating_min")
-        filter_text = arguments.get("filter") or ""
-        limit = int(arguments.get("limit", 50))
-
-        params: Dict[str, Any] = {
-            "rating_min": -1 if rating_min is None else int(rating_min),
-            "filter_text": str(filter_text),
-            "limit": int(limit),
-        }
-        output = self.lua.execute_script(_VIEW_PHOTOS_LUA, params)
-
-        rows = []
-        for line in output.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t")
-            if len(parts) != 3:
-                continue
-            try:
-                photo_id = int(parts[0])
-                rating = int(parts[1])
-            except ValueError:
-                continue
-            rows.append((photo_id, rating, parts[2]))
-
-        if not rows:
-            return [TextContent(type="text", text="No photos found.")]
-        body = "\n".join(f"#{pid}\trating={r:>2}\t{p}" for pid, r, p in rows)
-        return [TextContent(type="text", text=body)]
 
     async def _handle_export_images(self, arguments: Dict[str, Any]) -> List[TextContent]:
         photo_ids = arguments.get("photo_ids") or []

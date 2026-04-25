@@ -1,18 +1,31 @@
 """Photo tools for managing photos in darktable library."""
 
 import json
+import logging
 from typing import Dict, Any, List, Optional
 
 from ..darktable.lua_executor import LuaExecutor
-from ..utils.errors import DarktableMCPError
+from ..utils.errors import DarktableMCPError, DarktableNotFoundError
+
+logger = logging.getLogger(__name__)
 
 
 class PhotoTools:
     """Provides high-level photo management operations using darktable Lua API."""
 
     def __init__(self):
-        """Initialize PhotoTools with a LuaExecutor instance."""
-        self.lua_executor = LuaExecutor()
+        """Initialize PhotoTools with a LuaExecutor instance.
+
+        Raises:
+            DarktableMCPError: If darktable is not properly installed or configured
+        """
+        try:
+            self.lua_executor = LuaExecutor()
+        except DarktableNotFoundError as e:
+            raise DarktableMCPError(
+                f"darktable setup error: {e}. "
+                "Please ensure darktable is installed and you've opened it at least once."
+            )
 
     def view_photos(self, arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         """View photos from darktable library with optional filtering.
@@ -75,9 +88,17 @@ class PhotoTools:
 
         result = self.lua_executor.execute_script(script, params=params, headless=True)
         try:
-            return json.loads(result)
+            photos = json.loads(result)
+            if not isinstance(photos, list):
+                raise DarktableMCPError("Expected list of photos from darktable")
+            return photos
         except json.JSONDecodeError:
-            raise DarktableMCPError(f"Failed to parse photo data: {result}")
+            # Log the raw result for debugging
+            logger.error(f"Failed to parse darktable response: {result}")
+            raise DarktableMCPError(
+                "Failed to parse photo data from darktable. "
+                "Please check that darktable is properly configured."
+            )
 
     def rate_photos(self, arguments: Dict[str, Any]) -> str:
         """Rate photos in darktable library.

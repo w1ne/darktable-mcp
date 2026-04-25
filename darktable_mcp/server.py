@@ -9,7 +9,6 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from .darktable.cli_wrapper import CLIWrapper
-from .darktable.library_db import LibraryDB
 from .utils.errors import DarktableMCPError
 
 logger = logging.getLogger(__name__)
@@ -23,7 +22,6 @@ class DarktableMCPServer:
     def __init__(self) -> None:
         self.app: Server = Server("darktable-mcp")
         self._cli: Optional[CLIWrapper] = None
-        self._library: Optional[LibraryDB] = None
         self._handler_map: Dict[str, ToolHandler] = self._build_handlers()
         self._setup_tools()
 
@@ -32,12 +30,6 @@ class DarktableMCPServer:
         if self._cli is None:
             self._cli = CLIWrapper()
         return self._cli
-
-    @property
-    def library(self) -> LibraryDB:
-        if self._library is None:
-            self._library = LibraryDB()
-        return self._library
 
     def _setup_tools(self) -> None:
         @self.app.list_tools()
@@ -63,16 +55,13 @@ class DarktableMCPServer:
             Tool(
                 name="view_photos",
                 description=(
-                    "Browse darktable's library headlessly. "
-                    "Returns id, rating (-1 = rejected, 0–5 = stars), and path."
+                    "Browse darktable's library (not yet implemented — "
+                    "awaiting a long-running Lua plugin with IPC; see README)."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "filter": {
-                            "type": "string",
-                            "description": "Substring matched against folder or filename",
-                        },
+                        "filter": {"type": "string"},
                         "rating_min": {"type": "integer", "minimum": 1, "maximum": 5},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
                     },
@@ -155,7 +144,7 @@ class DarktableMCPServer:
 
     def _build_handlers(self) -> Dict[str, ToolHandler]:
         return {
-            "view_photos": self._handle_view_photos,
+            "view_photos": self._not_implemented("view_photos"),
             "rate_photos": self._not_implemented("rate_photos"),
             "import_batch": self._not_implemented("import_batch"),
             "adjust_exposure": self._not_implemented("adjust_exposure"),
@@ -175,21 +164,6 @@ class DarktableMCPServer:
                 text=f"{name} is not yet implemented.",
             )]
         return handler
-
-    async def _handle_view_photos(self, arguments: Dict[str, Any]) -> List[TextContent]:
-        rating_min = arguments.get("rating_min")
-        filter_text = arguments.get("filter")
-        limit = int(arguments.get("limit", 50))
-
-        rows = self.library.view_photos(
-            rating_min=rating_min,
-            filter_text=filter_text,
-            limit=limit,
-        )
-        if not rows:
-            return [TextContent(type="text", text="No photos found.")]
-        body = "\n".join(f"#{r.id}\trating={r.rating:>2}\t{r.path}" for r in rows)
-        return [TextContent(type="text", text=body)]
 
     async def _handle_export_images(self, arguments: Dict[str, Any]) -> List[TextContent]:
         photo_ids = arguments.get("photo_ids") or []

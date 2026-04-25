@@ -102,12 +102,13 @@ class PhotoTools:
         if not 1 <= rating <= 5:
             raise DarktableMCPError("rating must be between 1 and 5")
 
-        # Convert photo_ids list to Lua table syntax
-        lua_ids = "{" + ", ".join(f'"{pid}"' for pid in photo_ids) + "}"
+        # Parameters passed safely to Lua script
+        params = {
+            "photo_ids": photo_ids,
+            "rating": rating,
+        }
 
-        script = f'''
-        local photo_ids = {lua_ids}
-        local rating = {rating}
+        script = '''
         local updated_count = 0
 
         for _, photo_id in ipairs(photo_ids) do
@@ -121,7 +122,7 @@ class PhotoTools:
         print("Updated " .. updated_count .. " photos with " .. rating .. " stars")
         '''
 
-        return self.lua_executor.execute_script(script, headless=True)
+        return self.lua_executor.execute_script(script, params=params, headless=True)
 
     def import_batch(self, arguments: Dict[str, Any]) -> str:
         """Import photos in batch from a source directory.

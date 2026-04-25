@@ -125,3 +125,32 @@ class TestToolHandlers:
 
             assert len(result) == 1
             assert "No photos found" in result[0].text
+
+
+def test_all_tools_implemented():
+    """Verify all tools are registered in the MCP server."""
+    server = DarktableMCPServer()
+    tools = server.list_tools()
+
+    implemented_tools = ["view_photos", "rate_photos", "import_batch", "adjust_exposure", "export_images"]
+    stubbed_tools = ["apply_preset"]
+
+    for tool in implemented_tools:
+        assert tool in tools, f"Tool {tool} not found in server"
+
+    for tool in stubbed_tools:
+        assert tool in tools, f"Tool {tool} not found in server"
+
+
+def test_all_imports_work():
+    """Verify all core module imports work correctly."""
+    from darktable_mcp.server import DarktableMCPServer
+    from darktable_mcp.darktable.lua_executor import LuaExecutor
+    from darktable_mcp.darktable.library_detector import LibraryDetector
+    from darktable_mcp.tools.photo_tools import PhotoTools
+
+    # All imports should work without errors
+    assert DarktableMCPServer is not None
+    assert LuaExecutor is not None
+    assert LibraryDetector is not None
+    assert PhotoTools is not None

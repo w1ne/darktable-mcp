@@ -194,7 +194,10 @@ class PhotoTools:
             local image = dt.database[tonumber(photo_id)]
             if image then
                 -- Apply exposure adjustment
-                if image.modules and image.modules.exposure then
+                if image.modules then
+                    if not image.modules.exposure then
+                        image.modules.exposure = {exposure = 0}
+                    end
                     image.modules.exposure.exposure = image.modules.exposure.exposure + exposure_ev
                     adjusted_count = adjusted_count + 1
                 end

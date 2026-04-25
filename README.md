@@ -2,8 +2,8 @@
 
 A Model Context Protocol (MCP) server that exposes a small set of darktable
 operations to MCP clients (e.g. Claude Desktop, Claude Code). The AI lives in
-the client; this server just shells out to `darktable-cli` and reads
-darktable's SQLite library.
+the client; this server drives darktable through its provided APIs:
+`darktable-cli` for export and the official Lua API for library reads.
 
 ## Status
 
@@ -38,14 +38,12 @@ Add to your Claude Desktop config:
 }
 ```
 
-If your `library.db` is in a non-standard location, set `DARKTABLE_LIBRARY`
-to its absolute path.
-
 ## Implemented tools
 
-- `view_photos(filter?, rating_min?, limit?)` — reads darktable's `library.db`
-  and returns id, rating (-1 = rejected, 0–5 = stars), and absolute path per
-  row. The filter is a substring match against folder or filename.
+- `view_photos(filter?, rating_min?, limit?)` — runs a Lua script against
+  darktable's `darktable.database` and returns id, rating (-1 = rejected,
+  0–5 = stars), and absolute path per row. The filter is a substring match
+  against the full image path.
 - `export_images(photo_ids, output_path, format, quality?)` — exports each
   source file via `darktable-cli` to the given output directory.
 
@@ -70,7 +68,9 @@ with the resulting file paths.
 ## Contributing
 
 Contributions welcome. Adding a real implementation for any of the stubbed
-tools is the most useful place to start.
+tools is the most useful place to start. Stick to the provided APIs:
+`darktable-cli` for export and the Lua API for everything else — do not read
+or write `library.db` directly.
 
 ## License
 

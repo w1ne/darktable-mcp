@@ -1,7 +1,6 @@
 """Darktable library path detection across different operating systems."""
 
 from pathlib import Path
-from typing import Optional
 
 from ..utils.errors import DarktableNotFoundError
 

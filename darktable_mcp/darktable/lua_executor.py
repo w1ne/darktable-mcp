@@ -41,12 +41,87 @@ class LuaExecutor:
 
         return darktable_path
 
-    def execute_script(self, script_content: str, params: Dict[str, Any] = None) -> str:
-        """Execute a Lua script in darktable.
+    def execute_script(
+        self,
+        script_content: str,
+        params: Dict[str, Any] = None,
+        headless: bool = True,
+        gui_purpose: Optional[str] = None
+    ) -> str:
+        """Execute a Lua script in appropriate mode.
 
         Args:
             script_content: Lua script code to execute
             params: Parameters to pass to the script
+            headless: If True, execute in headless mode using lua interpreter.
+                     If False, execute with GUI using darktable --lua.
+                     Default: True
+            gui_purpose: Purpose description for GUI mode (optional)
+
+        Returns:
+            str: Script output
+
+        Raises:
+            DarktableLuaError: If script execution fails
+        """
+        if headless:
+            return self._execute_headless(script_content, params)
+        else:
+            return self._execute_with_gui(script_content, params, gui_purpose)
+
+    def _execute_headless(self, script_content: str, params: Dict[str, Any] = None) -> str:
+        """Execute script in headless mode using lua interpreter.
+
+        Args:
+            script_content: Lua script code to execute
+            params: Parameters to pass to the script
+
+        Returns:
+            str: Script output
+
+        Raises:
+            DarktableLuaError: If script execution fails
+        """
+        from .library_detector import LibraryDetector
+
+        params = params or {}
+        detector = LibraryDetector()
+        library_path = detector.find_library()
+
+        # Inject library path and parameters into script
+        param_lua = self._generate_param_lua(params)
+        script_with_setup = f'''dt = require("darktable")("--library", "{library_path}")
+{param_lua}
+{script_content}'''
+
+        try:
+            result = subprocess.run(
+                ['lua', '-e', script_with_setup],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr or "Unknown error"
+                raise DarktableLuaError(f"Headless Lua script execution failed: {error_msg}")
+
+            return result.stdout.strip()
+
+        except subprocess.TimeoutExpired:
+            raise DarktableLuaError("Lua script execution timed out")
+        except Exception as e:
+            raise DarktableLuaError(f"Failed to execute Lua script: {str(e)}")
+
+    def _execute_with_gui(
+        self, script_content: str, params: Dict[str, Any] = None, gui_purpose: str = None
+    ) -> str:
+        """Execute script with GUI (existing implementation).
+
+        Args:
+            script_content: Lua script code to execute
+            params: Parameters to pass to the script
+            gui_purpose: Purpose description for GUI mode (optional)
 
         Returns:
             str: Script output

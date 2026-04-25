@@ -175,10 +175,15 @@ class LuaExecutor:
         if not params:
             return ""
 
+        def escape_lua_string(s: str) -> str:
+            """Escape special characters in Lua string literals."""
+            return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+
         lua_lines = ["-- Injected parameters"]
         for key, value in params.items():
             if isinstance(value, str):
-                lua_lines.append(f'{key} = "{value}"')
+                escaped = escape_lua_string(value)
+                lua_lines.append(f'{key} = "{escaped}"')
             elif isinstance(value, (int, float)):
                 lua_lines.append(f"{key} = {value}")
             elif isinstance(value, bool):
@@ -188,7 +193,8 @@ class LuaExecutor:
                 items = []
                 for item in value:
                     if isinstance(item, str):
-                        items.append(f'"{item}"')
+                        escaped = escape_lua_string(item)
+                        items.append(f'"{escaped}"')
                     else:
                         items.append(str(item))
                 lua_lines.append(f'{key} = {{{", ".join(items)}}}')

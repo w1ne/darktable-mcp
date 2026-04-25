@@ -33,31 +33,39 @@ class PhotoTools:
         rating_min = arguments.get("rating_min")
         limit = arguments.get("limit", 100)
 
-        script = f'''
-        photos = {{}}
+        # Parameters passed safely to Lua script
+        params = {
+            "filter_text": filter_text,
+            "limit": limit,
+        }
+        if rating_min is not None:
+            params["rating_min"] = rating_min
+
+        script = '''
+        photos = {}
         count = 0
         for _, image in ipairs(dt.database) do
-            if count >= {limit} then break end
+            if count >= limit then break end
 
             local include = true
-            if {rating_min or "nil"} and image.rating < {rating_min or 0} then
+            if rating_min and image.rating < rating_min then
                 include = false
             end
 
-            if include and "{filter_text}" ~= "" then
-                local filename_match = string.find(string.lower(image.filename), string.lower("{filter_text}"))
+            if include and filter_text ~= "" then
+                local filename_match = string.find(string.lower(image.filename), string.lower(filter_text))
                 if not filename_match then
                     include = false
                 end
             end
 
             if include then
-                table.insert(photos, {{
+                table.insert(photos, {
                     id = tostring(image.id),
                     filename = image.filename,
                     path = image.path,
                     rating = image.rating or 0
-                }})
+                })
                 count = count + 1
             end
         end
@@ -65,7 +73,7 @@ class PhotoTools:
         print(dt.json.encode(photos))
         '''
 
-        result = self.lua_executor.execute_script(script, headless=True)
+        result = self.lua_executor.execute_script(script, params=params, headless=True)
         try:
             return json.loads(result)
         except json.JSONDecodeError:
@@ -135,12 +143,15 @@ class PhotoTools:
         if not source_path:
             raise DarktableMCPError("source_path is required")
 
-        script = f'''
-        local source_path = "{source_path}"
-        local recursive = {str(recursive).lower()}
+        # Parameters passed safely to Lua script
+        params = {
+            "source_path": source_path,
+            "recursive": recursive,
+        }
 
+        script = '''
         local imported_files = dt.database.import(source_path, recursive)
         print("Imported " .. #imported_files .. " photos from " .. source_path)
         '''
 
-        return self.lua_executor.execute_script(script, headless=True)
+        return self.lua_executor.execute_script(script, params=params, headless=True)

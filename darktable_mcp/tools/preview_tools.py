@@ -11,6 +11,9 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -371,3 +374,152 @@ def format_ratings_summary(result: Mapping[str, Any]) -> str:
         if len(bad) > 10:
             line += f"\n  ... and {len(bad) - 10} more"
     return line
+
+
+# darktable filter property codes (from src/common/collection.h).
+# 32 = DT_COLLECTION_PROP_RATING; 0 = DT_COLLECTION_PROP_FILMROLL.
+_DT_PROP_RATING = 32
+_DT_PROP_FILMROLL = 0
+
+
+def _normalize_rating_range(
+    rating: Optional[int],
+    rating_min: Optional[int],
+    rating_max: Optional[int],
+) -> Optional[Tuple[int, int]]:
+    """Return (lo, hi) for the rating filter, or None when no filter is requested.
+
+    Accepts either a single ``rating`` (exact match) or a ``rating_min`` /
+    ``rating_max`` range (either bound optional). Validates everything lands
+    in the darktable-supported range ``[-1, 5]`` (-1 = reject).
+    """
+    if rating is not None and (rating_min is not None or rating_max is not None):
+        raise DarktableMCPError(
+            "Pass either `rating` or `rating_min`/`rating_max`, not both."
+        )
+
+    if rating is not None:
+        lo = hi = int(rating)
+    elif rating_min is None and rating_max is None:
+        return None
+    else:
+        lo = int(rating_min) if rating_min is not None else -1
+        hi = int(rating_max) if rating_max is not None else 5
+
+    if lo < -1 or hi > 5 or lo > hi:
+        raise DarktableMCPError(
+            f"rating range out of bounds [-1, 5]: lo={lo}, hi={hi}"
+        )
+    return lo, hi
+
+
+def build_darktable_command(
+    source_dir: str | Path,
+    rating: Optional[int] = None,
+    rating_min: Optional[int] = None,
+    rating_max: Optional[int] = None,
+    darktable_path: str = "darktable",
+) -> List[str]:
+    """Build the ``darktable`` command line for a folder with an optional rating filter.
+
+    Uses the darktable 5.x filtering system (``plugins/lighttable/filtering/*``).
+    The 4.x-era ``plugins/collection/rating`` keys are NOT honored by the
+    current GUI's filter bar, so we don't set them. The filter string format
+    for rating is ``[lo;hi]`` (range, inclusive).
+
+    Returns a list suitable for ``subprocess.Popen``.
+    """
+    src = Path(source_dir).expanduser().resolve()
+    if not src.is_dir():
+        raise DarktableMCPError(f"source_dir is not a directory: {src}")
+
+    cmd: List[str] = [darktable_path]
+
+    # Always pin the collection to "all film rolls" so an unrelated saved
+    # collection doesn't hide the folder we're opening.
+    cmd += [
+        "--conf", f"plugins/lighttable/collect/num_rules=1",
+        "--conf", f"plugins/lighttable/collect/item0={_DT_PROP_FILMROLL}",
+        "--conf", "plugins/lighttable/collect/string0=%",
+    ]
+
+    rating_range = _normalize_rating_range(rating, rating_min, rating_max)
+    if rating_range is not None:
+        lo, hi = rating_range
+        cmd += [
+            "--conf", "plugins/lighttable/filtering/num_rules=1",
+            "--conf", f"plugins/lighttable/filtering/item0={_DT_PROP_RATING}",
+            "--conf", "plugins/lighttable/filtering/mode0=0",
+            "--conf", f"plugins/lighttable/filtering/string0=[{lo};{hi}]",
+            "--conf", "plugins/lighttable/filtering/off0=0",
+        ]
+    else:
+        # Disable any leftover filtering rules so all images are visible.
+        cmd += ["--conf", "plugins/lighttable/filtering/num_rules=0"]
+
+    cmd.append(str(src))
+    return cmd
+
+
+def open_in_darktable(
+    source_dir: str | Path,
+    rating: Optional[int] = None,
+    rating_min: Optional[int] = None,
+    rating_max: Optional[int] = None,
+    darktable_path: str = "darktable",
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Spawn darktable on ``source_dir`` with the rating filter pre-applied.
+
+    Opening a folder via the CLI registers it as a film roll on first launch,
+    and the XMP sidecars produced by ``apply_ratings_batch`` are picked up
+    automatically — so the lighttable view shows only the matching photos.
+    The filter uses darktable 5.x's ``plugins/lighttable/filtering/*`` system;
+    older ``plugins/collection/rating`` keys are intentionally not set because
+    the modern filter bar overrides them.
+
+    Args:
+        source_dir: Folder containing raw files (with XMP sidecars next to them).
+        rating: Filter to exactly this rating (-1 reject, 0 unrated, 1-5 stars).
+        rating_min: Lower bound of a rating range (inclusive). Mutually exclusive with ``rating``.
+        rating_max: Upper bound of a rating range (inclusive). Mutually exclusive with ``rating``.
+        darktable_path: Executable to launch. Default: ``darktable`` on PATH.
+        dry_run: If True, return the built command without spawning.
+
+    Returns dict with ``command`` (list of args) and ``pid`` (None on dry_run).
+    Raises ``DarktableMCPError`` if ``source_dir`` is invalid, the rating
+    range is invalid, or the darktable binary can't be found.
+    """
+    cmd = build_darktable_command(
+        source_dir,
+        rating=rating,
+        rating_min=rating_min,
+        rating_max=rating_max,
+        darktable_path=darktable_path,
+    )
+
+    if dry_run:
+        return {"command": cmd, "pid": None}
+
+    if shutil.which(darktable_path) is None and not Path(darktable_path).is_file():
+        raise DarktableMCPError(
+            f"darktable executable not found: {darktable_path!r}. "
+            "Install darktable or pass `darktable_path` explicitly."
+        )
+
+    # Detach so darktable survives the MCP tool call returning.
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return {"command": cmd, "pid": proc.pid}
+
+
+def format_open_summary(result: Mapping[str, Any]) -> str:
+    """Human-readable summary of ``open_in_darktable`` for tool TextContent."""
+    pid = result.get("pid")
+    head = f"darktable launched (pid={pid})" if pid else "command (dry run):"
+    return head + "\n" + " ".join(result["command"])

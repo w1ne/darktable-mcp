@@ -15,7 +15,9 @@ from .tools.preview_tools import (
     apply_ratings_batch,
     extract_previews,
     format_extract_summary,
+    format_open_summary,
     format_ratings_summary,
+    open_in_darktable,
 )
 from .utils.errors import DarktableMCPError
 
@@ -300,6 +302,55 @@ class DarktableMCPServer:
                 },
             ),
             Tool(
+                name="open_in_darktable",
+                description=(
+                    "Launch darktable GUI on a folder with the rating filter "
+                    "pre-applied so the lighttable opens already showing only "
+                    "matching photos. Opening a folder via CLI registers it as "
+                    "a film roll on first launch, and XMP sidecars (from "
+                    "apply_ratings_batch) are picked up automatically. Pass "
+                    "either `rating` for an exact match or `rating_min`/"
+                    "`rating_max` for a range. Without any rating arg, no "
+                    "filter is applied (all photos shown)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "source_dir": {
+                            "type": "string",
+                            "description": "Folder containing the raw files",
+                        },
+                        "rating": {
+                            "type": "integer",
+                            "minimum": -1,
+                            "maximum": 5,
+                            "description": (
+                                "Filter to exactly this rating "
+                                "(-1=reject, 0=unrated, 1-5=stars)"
+                            ),
+                        },
+                        "rating_min": {
+                            "type": "integer",
+                            "minimum": -1,
+                            "maximum": 5,
+                            "description": "Lower bound of a rating range",
+                        },
+                        "rating_max": {
+                            "type": "integer",
+                            "minimum": -1,
+                            "maximum": 5,
+                            "description": "Upper bound of a rating range",
+                        },
+                        "darktable_path": {
+                            "type": "string",
+                            "default": "darktable",
+                            "description": "darktable executable (default: 'darktable' on PATH)",
+                        },
+                    },
+                    "required": ["source_dir"],
+                },
+            ),
+            Tool(
                 name="export_images",
                 description=(
                     "Export photos to JPEG/PNG/TIFF via darktable-cli. "
@@ -340,6 +391,7 @@ class DarktableMCPServer:
             "export_images": self._handle_export_images,
             "extract_previews": self._handle_extract_previews,
             "apply_ratings_batch": self._handle_apply_ratings_batch,
+            "open_in_darktable": self._handle_open_in_darktable,
         }
 
     def list_tools(self) -> List[str]:
@@ -453,6 +505,19 @@ class DarktableMCPServer:
         )
         body = format_extract_summary(result) + "\n\n" + json.dumps(result["items"], indent=2)
         return [TextContent(type="text", text=body)]
+
+    async def _handle_open_in_darktable(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        source_dir = arguments.get("source_dir")
+        if not source_dir:
+            return [TextContent(type="text", text="source_dir is required")]
+        result = open_in_darktable(
+            source_dir=source_dir,
+            rating=arguments.get("rating"),
+            rating_min=arguments.get("rating_min"),
+            rating_max=arguments.get("rating_max"),
+            darktable_path=arguments.get("darktable_path", "darktable"),
+        )
+        return [TextContent(type="text", text=format_open_summary(result))]
 
     async def _handle_apply_ratings_batch(self, arguments: Dict[str, Any]) -> List[TextContent]:
         source_dir = arguments.get("source_dir")

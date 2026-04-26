@@ -10,9 +10,12 @@ import pytest
 from darktable_mcp.tools.preview_tools import (
     XMP_TEMPLATE,
     apply_ratings_batch,
+    build_darktable_command,
     extract_previews,
     format_extract_summary,
+    format_open_summary,
     format_ratings_summary,
+    open_in_darktable,
 )
 from darktable_mcp.utils.errors import DarktableMCPError
 
@@ -174,3 +177,83 @@ class TestXmpTemplate:
         out = XMP_TEMPLATE.format(rating=4)
         assert "<xmp:Rating>4</xmp:Rating>" in out
         assert "auto_presets_applied>0" in out
+
+
+class TestBuildDarktableCommand:
+    def test_no_filter_disables_filtering_rules(self, tmp_path: Path) -> None:
+        cmd = build_darktable_command(tmp_path)
+        joined = " ".join(cmd)
+        assert "plugins/lighttable/filtering/num_rules=0" in joined
+        assert "filtering/string0" not in joined
+        assert cmd[-1] == str(tmp_path)
+
+    def test_exact_rating_uses_5x_filter_keys(self, tmp_path: Path) -> None:
+        cmd = build_darktable_command(tmp_path, rating=5)
+        joined = " ".join(cmd)
+        # Rating prop code (32) and the [lo;hi] string format darktable 5.x expects.
+        assert "plugins/lighttable/filtering/item0=32" in joined
+        assert "plugins/lighttable/filtering/string0=[5;5]" in joined
+        assert "plugins/lighttable/filtering/num_rules=1" in joined
+        # Legacy collection/rating keys must NOT appear — they don't drive the modern UI.
+        assert "plugins/collection/rating" not in joined
+
+    def test_rating_min_only_means_open_upper_bound(self, tmp_path: Path) -> None:
+        cmd = build_darktable_command(tmp_path, rating_min=4)
+        assert any("string0=[4;5]" in a for a in cmd)
+
+    def test_rating_max_only_means_open_lower_bound(self, tmp_path: Path) -> None:
+        cmd = build_darktable_command(tmp_path, rating_max=2)
+        assert any("string0=[-1;2]" in a for a in cmd)
+
+    def test_reject_filter(self, tmp_path: Path) -> None:
+        cmd = build_darktable_command(tmp_path, rating=-1)
+        assert any("string0=[-1;-1]" in a for a in cmd)
+
+    def test_collection_pinned_to_all_film_rolls(self, tmp_path: Path) -> None:
+        cmd = build_darktable_command(tmp_path, rating=5)
+        joined = " ".join(cmd)
+        # Prevent a saved filmroll collection from hiding the folder.
+        assert "plugins/lighttable/collect/num_rules=1" in joined
+        assert "plugins/lighttable/collect/item0=0" in joined
+        assert "plugins/lighttable/collect/string0=%" in joined
+
+    def test_invalid_source_dir_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(DarktableMCPError):
+            build_darktable_command(tmp_path / "nope", rating=5)
+
+    def test_rejects_combined_rating_and_range(self, tmp_path: Path) -> None:
+        with pytest.raises(DarktableMCPError):
+            build_darktable_command(tmp_path, rating=5, rating_min=4)
+
+    def test_rejects_range_out_of_bounds(self, tmp_path: Path) -> None:
+        with pytest.raises(DarktableMCPError):
+            build_darktable_command(tmp_path, rating=6)
+        with pytest.raises(DarktableMCPError):
+            build_darktable_command(tmp_path, rating_min=4, rating_max=3)
+
+
+class TestOpenInDarktable:
+    def test_dry_run_returns_command_and_no_pid(self, tmp_path: Path) -> None:
+        result = open_in_darktable(tmp_path, rating=5, dry_run=True)
+        assert result["pid"] is None
+        assert any("string0=[5;5]" in a for a in result["command"])
+
+    def test_missing_executable_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(DarktableMCPError):
+            open_in_darktable(
+                tmp_path,
+                rating=5,
+                darktable_path="/nonexistent/darktable-binary",
+            )
+
+
+class TestFormatOpenSummary:
+    def test_dry_run_formatted(self, tmp_path: Path) -> None:
+        result = open_in_darktable(tmp_path, dry_run=True)
+        text = format_open_summary(result)
+        assert "dry run" in text
+        assert "darktable" in text
+
+    def test_live_run_includes_pid(self) -> None:
+        text = format_open_summary({"pid": 12345, "command": ["darktable", "/x"]})
+        assert "pid=12345" in text

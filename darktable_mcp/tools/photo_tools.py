@@ -78,8 +78,14 @@ class PhotoTools:
             )
         return cameras
 
+    DOWNLOAD_TIMEOUT_DEFAULT = 3600
+
     def _download_from_camera(
-        self, model: str, port: str, destination: Path
+        self,
+        model: str,
+        port: str,
+        destination: Path,
+        timeout_seconds: int = DOWNLOAD_TIMEOUT_DEFAULT,
     ) -> Tuple[int, List[str]]:
         """Run gphoto2 to copy all files from a camera to destination.
 
@@ -87,6 +93,8 @@ class PhotoTools:
             model: gphoto2 model string (e.g. "Nikon DSC D800E").
             port: gphoto2 port string (e.g. "usb:002,002").
             destination: directory to write files into. Created if missing.
+            timeout_seconds: subprocess timeout. Default 3600 s (1 hour);
+                a full 64 GB SD card over USB 3.0 fits comfortably.
 
         Returns:
             Tuple of (files_downloaded, error_messages). On partial failure
@@ -94,10 +102,12 @@ class PhotoTools:
             of saved files and any stderr lines as errors.
 
         Raises:
-            DarktableMCPError: if gphoto2 binary is not installed.
-            subprocess.TimeoutExpired: if the transfer exceeds 600 seconds.
-                Caller is responsible for handling this; partial files may be
-                present in `destination`.
+            DarktableMCPError: if gphoto2 binary is not installed, or if
+                gphoto2 fails to lock the camera (typically because gvfs
+                or another process holds it).
+            subprocess.TimeoutExpired: if the transfer exceeds
+                `timeout_seconds`. Caller is responsible for handling this;
+                partial files may be present in `destination`.
         """
         destination.mkdir(parents=True, exist_ok=True)
 
@@ -120,7 +130,7 @@ class PhotoTools:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=600,
+                timeout=timeout_seconds,
                 env=env,
             )
         except FileNotFoundError as exc:
@@ -130,10 +140,28 @@ class PhotoTools:
 
         # Count "Saving file as ..." lines on stdout
         count = sum(1 for line in result.stdout.splitlines() if "Saving file as" in line)
+        skipped = sum(1 for line in result.stdout.splitlines() if "Skip existing" in line)
 
         errors: List[str] = []
         if result.returncode != 0:
             errors.extend(line for line in result.stderr.splitlines() if line.strip())
+
+        # If nothing was saved or skipped and gphoto2 reports a lock error,
+        # surface a clear "another process has the camera" message rather
+        # than the raw "*** Error ***" stderr header.
+        stderr_lower = result.stderr.lower() if result.stderr else ""
+        if (
+            count == 0
+            and skipped == 0
+            and result.returncode != 0
+            and ("could not lock" in stderr_lower or "could not claim" in stderr_lower)
+        ):
+            raise DarktableMCPError(
+                f"Could not access camera at {port}. Another process is "
+                "holding it (typically gvfs / GNOME's volume monitor on "
+                "Linux desktops). Disconnect and reconnect the camera, "
+                "or stop gvfs-gphoto2-volume-monitor, then retry."
+            )
 
         return count, errors
 
@@ -304,6 +332,9 @@ class PhotoTools:
                   Default: ~/Pictures/import-YYYY-MM-DD/
                 - camera_port (str, optional): gphoto2 port string,
                   required when 2+ cameras are connected.
+                - timeout_seconds (int, optional): subprocess timeout for
+                  the transfer. Default 3600 (1 hour). Bump higher for
+                  cards larger than ~50 GB.
 
         Returns:
             Human-readable summary string.
@@ -315,6 +346,7 @@ class PhotoTools:
         """
         camera_port = arguments.get("camera_port")
         destination_arg = arguments.get("destination")
+        timeout_seconds = int(arguments.get("timeout_seconds", self.DOWNLOAD_TIMEOUT_DEFAULT))
 
         cameras = self._detect_cameras()
 
@@ -344,11 +376,15 @@ class PhotoTools:
             destination = (Path.home() / "Pictures" / f"import-{today}").resolve()
 
         try:
-            count, errors = self._download_from_camera(camera["model"], camera["port"], destination)
+            count, errors = self._download_from_camera(
+                camera["model"], camera["port"], destination, timeout_seconds
+            )
         except subprocess.TimeoutExpired as exc:
             raise DarktableMCPError(
-                f"Camera transfer timed out after 600 s. "
-                f"Destination {destination} may contain partial files."
+                f"Camera transfer timed out after {timeout_seconds} s. "
+                f"Destination {destination} may contain partial files. "
+                "Re-run the tool to resume — `--skip-existing` is on, so "
+                "already-copied files are not re-downloaded."
             ) from exc
 
         if count == 0 and errors:

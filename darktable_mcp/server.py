@@ -154,6 +154,16 @@ class DarktableMCPServer:
                                 "Required when multiple cameras are connected."
                             ),
                         },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "minimum": 60,
+                            "description": (
+                                "Subprocess timeout for the transfer. "
+                                "Default: 3600 (1 hour). On timeout, re-run "
+                                "the tool to resume — already-copied files "
+                                "are skipped."
+                            ),
+                        },
                     },
                 },
             ),

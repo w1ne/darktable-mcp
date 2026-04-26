@@ -442,6 +442,56 @@ class TestPhotoToolsDownloadFromCamera:
         cmd = mock_run.call_args[0][0]
         assert "--skip-existing" in cmd
 
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_download_default_timeout_is_one_hour(self, mock_run, _mock_executor, tmp_path):
+        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+        PhotoTools()._download_from_camera("Nikon DSC D800E", "usb:002,002", tmp_path)
+        assert mock_run.call_args.kwargs["timeout"] == 3600
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_download_respects_custom_timeout(self, mock_run, _mock_executor, tmp_path):
+        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+        PhotoTools()._download_from_camera(
+            "Nikon DSC D800E", "usb:002,002", tmp_path, timeout_seconds=120
+        )
+        assert mock_run.call_args.kwargs["timeout"] == 120
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_download_surfaces_gvfs_lock_error(self, mock_run, _mock_executor, tmp_path):
+        mock_run.return_value = Mock(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "*** Error ***\n"
+                "An error occurred in the io-layer ('Could not lock the device')\n"
+            ),
+        )
+        with pytest.raises(DarktableMCPError, match="Another process is "):
+            PhotoTools()._download_from_camera("Nikon DSC D800E", "usb:002,002", tmp_path)
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_download_skip_existing_only_is_not_lock_error(
+        self, mock_run, _mock_executor, tmp_path
+    ):
+        # When all files already exist on disk, gphoto2 prints "Skip
+        # existing" lines and may still return rc=0 (or rc=1 in some
+        # versions); either way, this is not a lock error. We must NOT
+        # raise — just return (count=0, errors=[]).
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout="Skip existing file /tmp/x/IMG_0001.NEF\n",
+            stderr="",
+        )
+        count, errors = PhotoTools()._download_from_camera(
+            "Nikon DSC D800E", "usb:002,002", tmp_path
+        )
+        assert count == 0
+        assert errors == []
+
 
 class TestPhotoToolsImportFromCamera:
     """Tests for PhotoTools.import_from_camera."""
@@ -599,3 +649,32 @@ class TestPhotoToolsImportFromCamera:
         tools = PhotoTools()
         with pytest.raises(DarktableMCPError, match="No files were transferred"):
             tools.import_from_camera({"destination": str(tmp_path)})
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch.object(PhotoTools, "_download_from_camera")
+    @patch.object(PhotoTools, "_detect_cameras")
+    def test_timeout_seconds_argument_flows_to_download(
+        self, mock_detect, mock_download, _mock_executor_cls, tmp_path
+    ):
+        mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
+        mock_download.return_value = (1, [])
+
+        tools = PhotoTools()
+        tools.import_from_camera({"destination": str(tmp_path), "timeout_seconds": 120})
+
+        # _download_from_camera receives timeout_seconds as the 4th positional arg
+        assert mock_download.call_args[0][3] == 120
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch.object(PhotoTools, "_download_from_camera")
+    @patch.object(PhotoTools, "_detect_cameras")
+    def test_timeout_seconds_default_is_one_hour(
+        self, mock_detect, mock_download, _mock_executor_cls, tmp_path
+    ):
+        mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
+        mock_download.return_value = (1, [])
+
+        tools = PhotoTools()
+        tools.import_from_camera({"destination": str(tmp_path)})
+
+        assert mock_download.call_args[0][3] == 3600

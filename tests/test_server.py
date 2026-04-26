@@ -158,14 +158,15 @@ async def test_import_from_camera_handler():
     server = DarktableMCPServer()
     mock_tools = Mock()
     mock_tools.import_from_camera.return_value = (
-        "Imported 5 photos from /tmp/import-2026-04-26\n" "Source: Nikon DSC D800E (usb:002,002)"
+        "Copied 5 file(s) from Nikon DSC D800E (usb:002,002)\n"
+        "Destination: /tmp/import-2026-04-26"
     )
     server._photo_tools = mock_tools
 
     result = await server._handle_import_from_camera({"destination": "/tmp/import-2026-04-26"})
 
     assert len(result) == 1
-    assert "Imported 5 photos" in result[0].text
+    assert "Copied 5 file(s)" in result[0].text
     assert "Nikon DSC D800E" in result[0].text
     mock_tools.import_from_camera.assert_called_once_with({"destination": "/tmp/import-2026-04-26"})
 

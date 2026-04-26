@@ -289,13 +289,14 @@ class PhotoTools:
         return self.lua_executor.execute_script(script, params=params, headless=True)
 
     def import_from_camera(self, arguments: Dict[str, Any]) -> str:
-        """Import all photos from a connected camera into darktable.
+        """Copy all photos from a connected camera to a local directory.
 
-        Detects connected cameras via gphoto2, copies all files to a
-        destination directory, and registers them with darktable's library
-        using the official Lua API. Mirrors darktable's GUI camera import.
-        Photos are imported recursively — all subdirectories of the destination
-        are scanned by darktable.
+        Detects connected cameras via gphoto2 (libgphoto2 — same library
+        darktable's GUI camera-import uses) and copies all files to a
+        destination directory. Registering the directory with darktable's
+        library is left to the user (open darktable, click "import folder")
+        because the Lua API path for that step is not yet reliable on all
+        installs.
 
         Args:
             arguments: Dictionary containing:
@@ -309,8 +310,8 @@ class PhotoTools:
 
         Raises:
             DarktableMCPError: if no camera detected, multiple cameras
-                without camera_port, invalid camera_port, or gphoto2
-                missing.
+                without camera_port, invalid camera_port, gphoto2 missing,
+                transfer timed out, or all files failed to copy.
         """
         camera_port = arguments.get("camera_port")
         destination_arg = arguments.get("destination")
@@ -356,26 +357,14 @@ class PhotoTools:
                 f"({camera['port']}). First error: {errors[0]}"
             )
 
-        # Register the destination directory with darktable via the Lua API
-        params = {
-            "source_path": str(destination),
-            "recursive": True,
-        }
-        script = """
-        local imported_files = dt.database.import(source_path, recursive)
-        print("Imported " .. #imported_files .. " photos from " .. source_path)
-        """
-        import_output = self.lua_executor.execute_script(script, params=params, headless=True)
-
         summary_parts = [
-            import_output.strip(),
-            f"Source: {camera['model']} ({camera['port']})",
+            f"Copied {count} file(s) from {camera['model']} ({camera['port']})",
             f"Destination: {destination}",
-            f"Files copied from camera: {count}",
+            "Open darktable and choose 'import folder' on this directory to add them to your library.",
         ]
         if errors:
             summary_parts.append(
-                f"Warning: {len(errors)} file(s) failed to copy. " f"First error: {errors[0]}"
+                f"Warning: {len(errors)} file(s) failed to copy. First error: {errors[0]}"
             )
         return "\n".join(summary_parts)
 

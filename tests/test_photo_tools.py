@@ -450,21 +450,17 @@ class TestPhotoToolsImportFromCamera:
     @patch.object(PhotoTools, "_download_from_camera")
     @patch.object(PhotoTools, "_detect_cameras")
     def test_one_camera_default_destination(
-        self, mock_detect, mock_download, mock_executor_cls, tmp_path, monkeypatch
+        self, mock_detect, mock_download, _mock_executor_cls, tmp_path, monkeypatch
     ):
         mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
         mock_download.return_value = (5, [])
         # Force HOME so the default destination lands inside tmp_path
         monkeypatch.setenv("HOME", str(tmp_path))
-        mock_executor = mock_executor_cls.return_value
-        mock_executor.execute_script.return_value = (
-            "Imported 5 photos from /tmp/.../import-2026-04-26"
-        )
 
         tools = PhotoTools()
         summary = tools.import_from_camera({})
 
-        assert "Imported 5 photos" in summary
+        assert "Copied 5 file(s)" in summary
         assert "Nikon DSC D800E" in summary
         # Default destination must include today's date
         dest_arg = mock_download.call_args[0][2]
@@ -498,14 +494,13 @@ class TestPhotoToolsImportFromCamera:
     @patch.object(PhotoTools, "_download_from_camera")
     @patch.object(PhotoTools, "_detect_cameras")
     def test_multiple_cameras_with_port_selects(
-        self, mock_detect, mock_download, mock_executor_cls, tmp_path
+        self, mock_detect, mock_download, _mock_executor_cls, tmp_path
     ):
         mock_detect.return_value = [
             {"model": "Nikon DSC D800E", "port": "usb:002,002"},
             {"model": "Canon EOS R5", "port": "usb:003,004"},
         ]
         mock_download.return_value = (1, [])
-        mock_executor_cls.return_value.execute_script.return_value = "Imported 1 photos"
 
         tools = PhotoTools()
         tools.import_from_camera({"camera_port": "usb:003,004", "destination": str(tmp_path)})
@@ -528,55 +523,51 @@ class TestPhotoToolsImportFromCamera:
     @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
     @patch.object(PhotoTools, "_download_from_camera")
     @patch.object(PhotoTools, "_detect_cameras")
-    def test_partial_copy_still_imports(
-        self, mock_detect, mock_download, mock_executor_cls, tmp_path
+    def test_partial_copy_reports_warning(
+        self, mock_detect, mock_download, _mock_executor_cls, tmp_path
     ):
         mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
         mock_download.return_value = (3, ["ERROR: file X failed"])
-        mock_executor_cls.return_value.execute_script.return_value = "Imported 3 photos"
         tools = PhotoTools()
         summary = tools.import_from_camera({"destination": str(tmp_path)})
-        assert "Imported 3 photos" in summary
+        assert "Copied 3 file(s)" in summary
         assert "Warning" in summary
         assert "1 file" in summary
 
     @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
     @patch.object(PhotoTools, "_download_from_camera")
     @patch.object(PhotoTools, "_detect_cameras")
-    def test_calls_lua_database_import(
+    def test_does_not_call_lua_executor(
         self, mock_detect, mock_download, mock_executor_cls, tmp_path
     ):
+        # The pragmatic version copies files but doesn't try to register them
+        # with darktable's library — that's left to the user via the GUI.
         mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
         mock_download.return_value = (2, [])
-        mock_executor = mock_executor_cls.return_value
-        mock_executor.execute_script.return_value = "Imported 2 photos"
 
         tools = PhotoTools()
-        tools.import_from_camera({"destination": str(tmp_path)})
+        summary = tools.import_from_camera({"destination": str(tmp_path)})
 
-        # Verify the Lua script that was sent calls dt.database.import
-        lua_call = mock_executor.execute_script.call_args
-        all_args = list(lua_call.args) + list(lua_call.kwargs.values())
-        assert any("dt.database.import" in str(a) for a in all_args)
-        # And headless=True (Lua API path, not raw DB)
-        assert lua_call.kwargs.get("headless") is True
+        mock_executor_cls.return_value.execute_script.assert_not_called()
+        # User must be told how to register the files in darktable
+        assert "darktable" in summary.lower()
+        assert "import folder" in summary.lower()
 
     @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
     @patch.object(PhotoTools, "_download_from_camera")
     @patch.object(PhotoTools, "_detect_cameras")
     def test_one_camera_with_matching_port(
-        self, mock_detect, mock_download, mock_executor_cls, tmp_path
+        self, mock_detect, mock_download, _mock_executor_cls, tmp_path
     ):
         mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
         mock_download.return_value = (4, [])
-        mock_executor_cls.return_value.execute_script.return_value = "Imported 4 photos"
 
         tools = PhotoTools()
         summary = tools.import_from_camera(
             {"camera_port": "usb:002,002", "destination": str(tmp_path)}
         )
 
-        assert "Imported 4 photos" in summary
+        assert "Copied 4 file(s)" in summary
         # Selection should use the matching camera even when only one exists
         assert mock_download.call_args[0][0] == "Nikon DSC D800E"
         assert mock_download.call_args[0][1] == "usb:002,002"

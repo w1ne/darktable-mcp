@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import subprocess
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -286,6 +287,83 @@ class PhotoTools:
         """
 
         return self.lua_executor.execute_script(script, params=params, headless=True)
+
+    def import_from_camera(self, arguments: Dict[str, Any]) -> str:
+        """Import all photos from a connected camera into darktable.
+
+        Detects connected cameras via gphoto2, copies all files to a
+        destination directory, and registers them with darktable's library
+        using the official Lua API. Mirrors darktable's GUI camera import.
+
+        Args:
+            arguments: Dictionary containing:
+                - destination (str, optional): target directory.
+                  Default: ~/Pictures/import-YYYY-MM-DD/
+                - camera_port (str, optional): gphoto2 port string,
+                  required when 2+ cameras are connected.
+
+        Returns:
+            Human-readable summary string.
+
+        Raises:
+            DarktableMCPError: if no camera detected, multiple cameras
+                without camera_port, invalid camera_port, or gphoto2
+                missing.
+        """
+        camera_port = arguments.get("camera_port")
+        destination_arg = arguments.get("destination")
+
+        cameras = self._detect_cameras()
+
+        if not cameras:
+            raise DarktableMCPError("No camera detected. Is the camera connected and powered on?")
+
+        if camera_port:
+            matching = [c for c in cameras if c["port"] == camera_port]
+            if not matching:
+                ports = ", ".join(c["port"] for c in cameras)
+                raise DarktableMCPError(
+                    f"camera_port '{camera_port}' not found. " f"Detected ports: {ports}"
+                )
+            camera = matching[0]
+        elif len(cameras) > 1:
+            listing = ", ".join(f"{c['model']} ({c['port']})" for c in cameras)
+            raise DarktableMCPError(
+                f"Multiple cameras detected: {listing}. " "Pass camera_port=... to select one."
+            )
+        else:
+            camera = cameras[0]
+
+        if destination_arg:
+            destination = Path(destination_arg).expanduser().resolve()
+        else:
+            today = date.today().isoformat()
+            destination = (Path.home() / "Pictures" / f"import-{today}").resolve()
+
+        count, errors = self._download_from_camera(camera["model"], camera["port"], destination)
+
+        # Register the destination directory with darktable via the Lua API
+        params = {
+            "source_path": str(destination),
+            "recursive": True,
+        }
+        script = """
+        local imported_files = dt.database.import(source_path, recursive)
+        print("Imported " .. #imported_files .. " photos from " .. source_path)
+        """
+        import_output = self.lua_executor.execute_script(script, params=params, headless=True)
+
+        summary_parts = [
+            import_output.strip(),
+            f"Source: {camera['model']} ({camera['port']})",
+            f"Destination: {destination}",
+            f"Files copied from camera: {count}",
+        ]
+        if errors:
+            summary_parts.append(
+                f"Warning: {len(errors)} file(s) failed to copy. " f"First error: {errors[0]}"
+            )
+        return "\n".join(summary_parts)
 
     def adjust_exposure(self, arguments: Dict[str, Any]) -> str:
         """Adjust exposure for photos (requires GUI for preview).

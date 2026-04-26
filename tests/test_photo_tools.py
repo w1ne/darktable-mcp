@@ -560,3 +560,51 @@ class TestPhotoToolsImportFromCamera:
         assert any("dt.database.import" in str(a) for a in all_args)
         # And headless=True (Lua API path, not raw DB)
         assert lua_call.kwargs.get("headless") is True
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch.object(PhotoTools, "_download_from_camera")
+    @patch.object(PhotoTools, "_detect_cameras")
+    def test_one_camera_with_matching_port(
+        self, mock_detect, mock_download, mock_executor_cls, tmp_path
+    ):
+        mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
+        mock_download.return_value = (4, [])
+        mock_executor_cls.return_value.execute_script.return_value = "Imported 4 photos"
+
+        tools = PhotoTools()
+        summary = tools.import_from_camera(
+            {"camera_port": "usb:002,002", "destination": str(tmp_path)}
+        )
+
+        assert "Imported 4 photos" in summary
+        # Selection should use the matching camera even when only one exists
+        assert mock_download.call_args[0][0] == "Nikon DSC D800E"
+        assert mock_download.call_args[0][1] == "usb:002,002"
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch.object(PhotoTools, "_download_from_camera")
+    @patch.object(PhotoTools, "_detect_cameras")
+    def test_download_timeout_raises_clean_error(
+        self, mock_detect, mock_download, _mock_executor_cls, tmp_path
+    ):
+        import subprocess
+
+        mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
+        mock_download.side_effect = subprocess.TimeoutExpired(cmd=["gphoto2"], timeout=600)
+
+        tools = PhotoTools()
+        with pytest.raises(DarktableMCPError, match="timed out"):
+            tools.import_from_camera({"destination": str(tmp_path)})
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch.object(PhotoTools, "_download_from_camera")
+    @patch.object(PhotoTools, "_detect_cameras")
+    def test_total_download_failure_raises(
+        self, mock_detect, mock_download, _mock_executor_cls, tmp_path
+    ):
+        mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
+        mock_download.return_value = (0, ["ERROR: device unreachable"])
+
+        tools = PhotoTools()
+        with pytest.raises(DarktableMCPError, match="No files were transferred"):
+            tools.import_from_camera({"destination": str(tmp_path)})

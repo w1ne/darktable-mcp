@@ -294,6 +294,8 @@ class PhotoTools:
         Detects connected cameras via gphoto2, copies all files to a
         destination directory, and registers them with darktable's library
         using the official Lua API. Mirrors darktable's GUI camera import.
+        Photos are imported recursively — all subdirectories of the destination
+        are scanned by darktable.
 
         Args:
             arguments: Dictionary containing:
@@ -340,7 +342,19 @@ class PhotoTools:
             today = date.today().isoformat()
             destination = (Path.home() / "Pictures" / f"import-{today}").resolve()
 
-        count, errors = self._download_from_camera(camera["model"], camera["port"], destination)
+        try:
+            count, errors = self._download_from_camera(camera["model"], camera["port"], destination)
+        except subprocess.TimeoutExpired as exc:
+            raise DarktableMCPError(
+                f"Camera transfer timed out after 600 s. "
+                f"Destination {destination} may contain partial files."
+            ) from exc
+
+        if count == 0 and errors:
+            raise DarktableMCPError(
+                f"No files were transferred from {camera['model']} "
+                f"({camera['port']}). First error: {errors[0]}"
+            )
 
         # Register the destination directory with darktable via the Lua API
         params = {

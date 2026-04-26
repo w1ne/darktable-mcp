@@ -2,6 +2,8 @@
 
 import json
 import logging
+import re
+import subprocess
 from typing import Any, Dict, List
 
 from ..darktable.lua_executor import LuaExecutor
@@ -26,6 +28,43 @@ class PhotoTools:
                 f"darktable setup error: {e}. "
                 "Please ensure darktable is installed and opened once."
             ) from e
+
+    def _detect_cameras(self) -> List[Dict[str, str]]:
+        """Run `gphoto2 --auto-detect` and return parsed list of cameras.
+
+        Returns:
+            List of dicts with keys "model" and "port", e.g.
+            [{"model": "Nikon DSC D800E", "port": "usb:002,002"}].
+            Empty list if no cameras detected.
+
+        Raises:
+            DarktableMCPError: if gphoto2 binary is not installed.
+        """
+        try:
+            result = subprocess.run(
+                ["gphoto2", "--auto-detect"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except FileNotFoundError as exc:
+            raise DarktableMCPError(
+                "gphoto2 not installed. Install with `apt install gphoto2` "
+                "(Debian/Ubuntu) or your distro's package manager."
+            ) from exc
+
+        cameras: List[Dict[str, str]] = []
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            # Skip header ("Model ... Port") and separator ("----...")
+            if not stripped or stripped.startswith("Model") or set(stripped) <= {"-"}:
+                continue
+            # gphoto2 separates model from port with 2+ spaces
+            parts = re.split(r"\s{2,}", stripped, maxsplit=1)
+            if len(parts) != 2:
+                continue
+            cameras.append({"model": parts[0].strip(), "port": parts[1].strip()})
+        return cameras
 
     def view_photos(self, arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         """View photos from darktable library with optional filtering.

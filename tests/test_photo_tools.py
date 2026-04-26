@@ -1,6 +1,6 @@
 """Tests for PhotoTools module."""
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -265,3 +265,64 @@ class TestPhotoToolsAdjustExposure:
             mock_executor.execute_script.return_value = "Adjusted exposure for 1 photos by -5.0 EV"
             result = tools.adjust_exposure({"photo_ids": ["123"], "exposure_ev": -5.0})
             assert "Adjusted exposure" in result
+
+
+class TestPhotoToolsDetectCameras:
+    """Tests for PhotoTools._detect_cameras helper."""
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_detect_cameras_one_camera(self, mock_run, _mock_executor):
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout=(
+                "Model                          Port\n"
+                "----------------------------------------------------------\n"
+                "Nikon DSC D800E                usb:002,002\n"
+            ),
+            stderr="",
+        )
+        tools = PhotoTools()
+        cameras = tools._detect_cameras()
+        assert cameras == [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_detect_cameras_none(self, mock_run, _mock_executor):
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout=(
+                "Model                          Port\n"
+                "----------------------------------------------------------\n"
+            ),
+            stderr="",
+        )
+        tools = PhotoTools()
+        assert tools._detect_cameras() == []
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_detect_cameras_multiple(self, mock_run, _mock_executor):
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout=(
+                "Model                          Port\n"
+                "----------------------------------------------------------\n"
+                "Nikon DSC D800E                usb:002,002\n"
+                "Canon EOS R5                   usb:003,004\n"
+            ),
+            stderr="",
+        )
+        tools = PhotoTools()
+        cameras = tools._detect_cameras()
+        assert len(cameras) == 2
+        assert cameras[0]["model"] == "Nikon DSC D800E"
+        assert cameras[1]["port"] == "usb:003,004"
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_detect_cameras_gphoto2_missing(self, mock_run, _mock_executor):
+        mock_run.side_effect = FileNotFoundError("gphoto2")
+        tools = PhotoTools()
+        with pytest.raises(DarktableMCPError, match="gphoto2 not installed"):
+            tools._detect_cameras()

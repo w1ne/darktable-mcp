@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -93,6 +94,9 @@ class PhotoTools:
 
         Raises:
             DarktableMCPError: if gphoto2 binary is not installed.
+            subprocess.TimeoutExpired: if the transfer exceeds 600 seconds.
+                Caller is responsible for handling this; partial files may be
+                present in `destination`.
         """
         destination.mkdir(parents=True, exist_ok=True)
 
@@ -103,9 +107,12 @@ class PhotoTools:
             "--port",
             port,
             "--get-all-files",
+            "--skip-existing",
             "--filename",
             f"{destination}/%f",
         ]
+
+        env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
 
         try:
             result = subprocess.run(
@@ -113,6 +120,7 @@ class PhotoTools:
                 capture_output=True,
                 text=True,
                 timeout=600,
+                env=env,
             )
         except FileNotFoundError as exc:
             raise DarktableMCPError(

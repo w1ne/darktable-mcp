@@ -415,3 +415,29 @@ class TestPhotoToolsDownloadFromCamera:
         tools._download_from_camera("Nikon DSC D800E", "usb:002,002", target)
         assert target.exists()
         assert target.is_dir()
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_download_gphoto2_missing(self, mock_run, _mock_executor, tmp_path):
+        mock_run.side_effect = FileNotFoundError("gphoto2")
+        tools = PhotoTools()
+        with pytest.raises(DarktableMCPError, match="gphoto2 not installed"):
+            tools._download_from_camera("Nikon DSC D800E", "usb:002,002", tmp_path)
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_download_passes_c_locale_env(self, mock_run, _mock_executor, tmp_path):
+        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+        PhotoTools()._download_from_camera("Nikon DSC D800E", "usb:002,002", tmp_path)
+        env = mock_run.call_args.kwargs.get("env")
+        assert env is not None
+        assert env.get("LC_ALL") == "C"
+        assert env.get("LANG") == "C"
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_download_uses_skip_existing(self, mock_run, _mock_executor, tmp_path):
+        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+        PhotoTools()._download_from_camera("Nikon DSC D800E", "usb:002,002", tmp_path)
+        cmd = mock_run.call_args[0][0]
+        assert "--skip-existing" in cmd

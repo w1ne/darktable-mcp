@@ -1,5 +1,6 @@
 """Tests for PhotoTools module."""
 
+import subprocess
 from unittest.mock import Mock, patch
 
 import pytest
@@ -285,6 +286,12 @@ class TestPhotoToolsDetectCameras:
         tools = PhotoTools()
         cameras = tools._detect_cameras()
         assert cameras == [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
+        mock_run.assert_called_once_with(
+            ["gphoto2", "--auto-detect"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
 
     @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
     @patch("darktable_mcp.tools.photo_tools.subprocess.run")
@@ -325,4 +332,32 @@ class TestPhotoToolsDetectCameras:
         mock_run.side_effect = FileNotFoundError("gphoto2")
         tools = PhotoTools()
         with pytest.raises(DarktableMCPError, match="gphoto2 not installed"):
+            tools._detect_cameras()
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_detect_cameras_timeout(self, mock_run, _mock_executor):
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["gphoto2", "--auto-detect"], timeout=10
+        )
+        tools = PhotoTools()
+        with pytest.raises(DarktableMCPError, match="timed out"):
+            tools._detect_cameras()
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_detect_cameras_locked_by_gvfs(self, mock_run, _mock_executor):
+        mock_run.return_value = Mock(
+            returncode=1,
+            stdout=(
+                "Model                          Port\n"
+                "----------------------------------------------------------\n"
+            ),
+            stderr=(
+                "*** Error ***\n"
+                "An error occurred in the io-layer ('Could not lock the device')\n"
+            ),
+        )
+        tools = PhotoTools()
+        with pytest.raises(DarktableMCPError, match="Could not lock"):
             tools._detect_cameras()

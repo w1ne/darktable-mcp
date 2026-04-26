@@ -52,6 +52,11 @@ class PhotoTools:
                 "gphoto2 not installed. Install with `apt install gphoto2` "
                 "(Debian/Ubuntu) or your distro's package manager."
             ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise DarktableMCPError(
+                "Camera detection timed out after 10 seconds. "
+                "Is the camera busy or the USB connection unstable?"
+            ) from exc
 
         cameras: List[Dict[str, str]] = []
         for line in result.stdout.splitlines():
@@ -64,6 +69,10 @@ class PhotoTools:
             if len(parts) != 2:
                 continue
             cameras.append({"model": parts[0].strip(), "port": parts[1].strip()})
+        if not cameras and result.returncode != 0 and result.stderr.strip():
+            raise DarktableMCPError(
+                f"gphoto2 exited with code {result.returncode}: " f"{result.stderr.strip()[:200]}"
+            )
         return cameras
 
     def view_photos(self, arguments: Dict[str, Any]) -> List[Dict[str, Any]]:

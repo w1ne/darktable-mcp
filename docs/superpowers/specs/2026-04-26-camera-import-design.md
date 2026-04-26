@@ -118,6 +118,50 @@ Integration test in `tests/test_server.py`:
 
 No live gphoto2 / live camera tests in CI. Manual smoke test against the user's Nikon D800E is the validation step at end of implementation.
 
+## Implementation findings (post-build, 2026-04-26)
+
+After landing the implementation we tried to enable the original
+"automatic library register" step against a real Nikon D800E + a
+Darktable 5.4.1 AppImage install. Both Lua modes failed:
+
+- **Headless mode** (`lua -e 'dt = require("darktable")(...)'`) requires
+  the darktable Lua bindings on the system Lua search path. AppImage
+  installs do not expose them. This is the same gap that parked
+  `view_photos` in PR #5.
+- **GUI mode** (`darktable --luacmd 'dt.database.import(p, true); os.exit(0)'`)
+  hangs. With a print-only luacmd, darktable starts and exits cleanly
+  in <30 s. With `dt.database.import(...)` added, the `--luacmd` body
+  never executes within 45 s — neither the `print` after `import`
+  nor the `os.exit(0)` fires. Likely cause: `dt.database.import` is
+  either async (returns to a GUI event loop that never spins from
+  `--luacmd`) or `--luacmd` runs at a startup phase that doesn't
+  return control until full GUI init completes.
+
+**Decision:** the tool now stops at the gphoto2-copy step and
+instructs the user to open darktable and click *import folder* on the
+destination. This is reliable today and matches the user's GUI-style
+workflow expectation.
+
+**Possible future paths for the auto-register step** (none are quick
+fixes):
+
+1. Use `dt.register_event("post-import-image", handler)` with a counter
+   and exit when all expected events have fired. Requires knowing the
+   expected file count up front and a wall-clock timeout fallback.
+2. Run darktable as a long-lived daemon and IPC Lua commands into it.
+3. Build a custom darktable Lua module that drives the event loop
+   and exits cleanly after `dt.database.import`.
+
+Real-world findings that did land as fixes:
+
+- The 600 s subprocess timeout was too tight for a 22 GB transfer
+  (timed out at 386/556 files). Default bumped to 3600 s; new
+  `timeout_seconds` argument lets users override.
+- After the timeout, gvfs-gphoto2-volume-monitor on GNOME claimed
+  the camera lock briefly. The bare `*** Error ***` stderr header is
+  now parsed and surfaced as a clear "another process is holding
+  the camera (typically gvfs)" `DarktableMCPError`.
+
 ## Out of scope
 
 - A separate `list_cameras` tool. (If we ever want it, it's trivially `_detect_cameras` exposed.)

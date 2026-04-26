@@ -304,14 +304,16 @@ class DarktableMCPServer:
             Tool(
                 name="open_in_darktable",
                 description=(
-                    "Launch darktable GUI on a folder with the rating filter "
-                    "pre-applied so the lighttable opens already showing only "
-                    "matching photos. Opening a folder via CLI registers it as "
-                    "a film roll on first launch, and XMP sidecars (from "
-                    "apply_ratings_batch) are picked up automatically. Pass "
-                    "either `rating` for an exact match or `rating_min`/"
-                    "`rating_max` for a range. Without any rating arg, no "
-                    "filter is applied (all photos shown)."
+                    "Launch the darktable GUI on a folder. Opening a folder "
+                    "via CLI registers it as a film roll on first launch, and "
+                    "XMP sidecars (from apply_ratings_batch) are picked up "
+                    "automatically. The rating params (`rating` / `rating_min` "
+                    "/ `rating_max`) are FILTER HINTS — they're validated and "
+                    "echoed back with a star label, but NOT pre-applied via "
+                    "--conf (darktable's rating-filter string format is too "
+                    "version-specific to set reliably from a launcher). To "
+                    "filter, click the 'all images' dropdown in lighttable's "
+                    "top filter bar and pick the value from the response."
                 ),
                 inputSchema={
                     "type": "object",

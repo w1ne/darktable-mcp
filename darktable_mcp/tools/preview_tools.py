@@ -413,6 +413,19 @@ def _normalize_rating_range(
     return lo, hi
 
 
+def _format_rating_label(lo: int, hi: int) -> str:
+    """Format a rating range as a human-readable hint (e.g. '★★★★★', 'rejected', '★★ to ★★★★')."""
+    def stars(n: int) -> str:
+        if n == -1:
+            return "rejected"
+        if n == 0:
+            return "unstarred"
+        return "★" * n
+    if lo == hi:
+        return stars(lo)
+    return f"{stars(lo)} to {stars(hi)}"
+
+
 def build_darktable_command(
     source_dir: str | Path,
     rating: Optional[int] = None,
@@ -420,12 +433,25 @@ def build_darktable_command(
     rating_max: Optional[int] = None,
     darktable_path: str = "darktable",
 ) -> List[str]:
-    """Build the ``darktable`` command line for a folder with an optional rating filter.
+    """Build the ``darktable`` command line for opening a folder.
 
-    Uses the darktable 5.x filtering system (``plugins/lighttable/filtering/*``).
-    The 4.x-era ``plugins/collection/rating`` keys are NOT honored by the
-    current GUI's filter bar, so we don't set them. The filter string format
-    for rating is ``[lo;hi]`` (range, inclusive).
+    The folder is registered as a film roll on first launch and any XMP
+    sidecars are picked up automatically. We pin the active collection to
+    "all film rolls" via ``--conf`` so a stale saved collection can't hide
+    the folder being opened.
+
+    The rating params (``rating`` / ``rating_min`` / ``rating_max``) are
+    accepted, validated, and reported back in the returned summary so the
+    caller knows which filter to set in the lighttable filter bar — but
+    they are NOT applied via ``--conf``. We tried both
+    ``plugins/lighttable/filtering/string0=[lo;hi]`` (the new 5.x rules
+    panel) and the legacy ``plugins/collection/rating`` keys against
+    darktable 5.4.1, and both filtered to zero photos regardless of value.
+    The exact serialization the rating filter widget reads from rc is
+    version-dependent and undocumented, and ``--conf`` overrides aren't
+    written back to rc, so probing the right format is impractical from
+    a launcher tool. Asking the user (or AI client) to click the filter
+    dropdown after launch is short, robust, and version-independent.
 
     Returns a list suitable for ``subprocess.Popen``.
     """
@@ -433,31 +459,17 @@ def build_darktable_command(
     if not src.is_dir():
         raise DarktableMCPError(f"source_dir is not a directory: {src}")
 
-    cmd: List[str] = [darktable_path]
+    # Validate rating args even though we don't apply them — surfaces bad
+    # input to the caller before we spawn the GUI.
+    _normalize_rating_range(rating, rating_min, rating_max)
 
-    # Always pin the collection to "all film rolls" so an unrelated saved
-    # collection doesn't hide the folder we're opening.
-    cmd += [
-        "--conf", f"plugins/lighttable/collect/num_rules=1",
+    cmd: List[str] = [
+        darktable_path,
+        "--conf", "plugins/lighttable/collect/num_rules=1",
         "--conf", f"plugins/lighttable/collect/item0={_DT_PROP_FILMROLL}",
         "--conf", "plugins/lighttable/collect/string0=%",
+        str(src),
     ]
-
-    rating_range = _normalize_rating_range(rating, rating_min, rating_max)
-    if rating_range is not None:
-        lo, hi = rating_range
-        cmd += [
-            "--conf", "plugins/lighttable/filtering/num_rules=1",
-            "--conf", f"plugins/lighttable/filtering/item0={_DT_PROP_RATING}",
-            "--conf", "plugins/lighttable/filtering/mode0=0",
-            "--conf", f"plugins/lighttable/filtering/string0=[{lo};{hi}]",
-            "--conf", "plugins/lighttable/filtering/off0=0",
-        ]
-    else:
-        # Disable any leftover filtering rules so all images are visible.
-        cmd += ["--conf", "plugins/lighttable/filtering/num_rules=0"]
-
-    cmd.append(str(src))
     return cmd
 
 
@@ -469,26 +481,27 @@ def open_in_darktable(
     darktable_path: str = "darktable",
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Spawn darktable on ``source_dir`` with the rating filter pre-applied.
+    """Spawn darktable on ``source_dir`` and report the filter the caller should apply.
 
     Opening a folder via the CLI registers it as a film roll on first launch,
-    and the XMP sidecars produced by ``apply_ratings_batch`` are picked up
-    automatically — so the lighttable view shows only the matching photos.
-    The filter uses darktable 5.x's ``plugins/lighttable/filtering/*`` system;
-    older ``plugins/collection/rating`` keys are intentionally not set because
-    the modern filter bar overrides them.
+    and any XMP sidecars produced by ``apply_ratings_batch`` are picked up
+    automatically. The rating params do NOT pre-apply the filter (see
+    ``build_darktable_command`` for why); they're echoed back as a hint so
+    the caller knows which value to pick in the lighttable filter bar.
 
     Args:
         source_dir: Folder containing raw files (with XMP sidecars next to them).
-        rating: Filter to exactly this rating (-1 reject, 0 unrated, 1-5 stars).
-        rating_min: Lower bound of a rating range (inclusive). Mutually exclusive with ``rating``.
-        rating_max: Upper bound of a rating range (inclusive). Mutually exclusive with ``rating``.
+        rating: Filter hint — exactly this rating (-1 reject, 0 unrated, 1-5 stars).
+        rating_min: Filter hint — lower bound of a rating range (inclusive).
+        rating_max: Filter hint — upper bound of a rating range (inclusive).
         darktable_path: Executable to launch. Default: ``darktable`` on PATH.
         dry_run: If True, return the built command without spawning.
 
-    Returns dict with ``command`` (list of args) and ``pid`` (None on dry_run).
-    Raises ``DarktableMCPError`` if ``source_dir`` is invalid, the rating
-    range is invalid, or the darktable binary can't be found.
+    Returns dict with ``command``, ``pid`` (None on dry_run), and a
+    ``filter_hint`` describing which filter to set (None when no rating
+    args were passed). Raises ``DarktableMCPError`` if ``source_dir`` is
+    invalid, the rating range is invalid, or the darktable binary can't
+    be found.
     """
     cmd = build_darktable_command(
         source_dir,
@@ -498,8 +511,11 @@ def open_in_darktable(
         darktable_path=darktable_path,
     )
 
+    rating_range = _normalize_rating_range(rating, rating_min, rating_max)
+    filter_hint = _format_rating_label(*rating_range) if rating_range else None
+
     if dry_run:
-        return {"command": cmd, "pid": None}
+        return {"command": cmd, "pid": None, "filter_hint": filter_hint}
 
     if shutil.which(darktable_path) is None and not Path(darktable_path).is_file():
         raise DarktableMCPError(
@@ -515,11 +531,20 @@ def open_in_darktable(
         stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
-    return {"command": cmd, "pid": proc.pid}
+    return {"command": cmd, "pid": proc.pid, "filter_hint": filter_hint}
 
 
 def format_open_summary(result: Mapping[str, Any]) -> str:
     """Human-readable summary of ``open_in_darktable`` for tool TextContent."""
     pid = result.get("pid")
     head = f"darktable launched (pid={pid})" if pid else "command (dry run):"
-    return head + "\n" + " ".join(result["command"])
+    lines = [head, " ".join(result["command"])]
+    hint = result.get("filter_hint")
+    if hint:
+        lines.append(
+            f"To filter to {hint}: in lighttable's top filter bar click the "
+            f"'all images' dropdown and pick {hint}. (Rating filter is not "
+            f"pre-applied — darktable's --conf for filter rules is too "
+            f"version-specific to bet on.)"
+        )
+    return "\n".join(lines)

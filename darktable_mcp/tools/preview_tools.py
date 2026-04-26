@@ -426,6 +426,32 @@ def _format_rating_label(lo: int, hi: int) -> str:
     return f"{stars(lo)} to {stars(hi)}"
 
 
+def _build_filter_luacmd(lo: int, hi: int) -> Optional[str]:
+    """Generate a --luacmd snippet that pre-applies the rating filter.
+
+    Uses ``darktable.gui.libs.collect.filter({rule})`` — the official Lua
+    API for setting collection filter rules. The enum names are full
+    C identifiers (``DT_COLLECTION_PROP_RATING``, ``DT_LIB_COLLECT_MODE_AND``),
+    which is what luaA registers them under. Only exact-rating filtering
+    is supported here (``lo == hi``); range filtering uses a different
+    filter type (the new lib/filtering/rules/range rating panel) that
+    isn't reachable via the collect API in dt 5.4.
+
+    Returns None for ranges we can't express as a single discrete-rating
+    rule — caller should fall back to opening unfiltered.
+    """
+    if lo != hi:
+        return None
+    rating_value = lo
+    return (
+        "local _r = darktable.gui.libs.collect.new_rule(); "
+        "_r.item = 'DT_COLLECTION_PROP_RATING'; "
+        "_r.mode = 'DT_LIB_COLLECT_MODE_AND'; "
+        f"_r.data = '{rating_value}'; "
+        "darktable.gui.libs.collect.filter({_r})"
+    )
+
+
 def build_darktable_command(
     source_dir: str | Path,
     rating: Optional[int] = None,
@@ -440,18 +466,12 @@ def build_darktable_command(
     "all film rolls" via ``--conf`` so a stale saved collection can't hide
     the folder being opened.
 
-    The rating params (``rating`` / ``rating_min`` / ``rating_max``) are
-    accepted, validated, and reported back in the returned summary so the
-    caller knows which filter to set in the lighttable filter bar — but
-    they are NOT applied via ``--conf``. We tried both
-    ``plugins/lighttable/filtering/string0=[lo;hi]`` (the new 5.x rules
-    panel) and the legacy ``plugins/collection/rating`` keys against
-    darktable 5.4.1, and both filtered to zero photos regardless of value.
-    The exact serialization the rating filter widget reads from rc is
-    version-dependent and undocumented, and ``--conf`` overrides aren't
-    written back to rc, so probing the right format is impractical from
-    a launcher tool. Asking the user (or AI client) to click the filter
-    dropdown after launch is short, robust, and version-independent.
+    When ``rating`` is set (or rating_min == rating_max), the rating
+    filter is pre-applied via ``--luacmd`` using
+    ``darktable.gui.libs.collect.filter({rule})``. Range filtering
+    (rating_min != rating_max) is not currently pre-applied — the Lua
+    API exposes only the discrete-rating filter, not the new "range
+    rating" panel — so a range request opens unfiltered with a hint.
 
     Returns a list suitable for ``subprocess.Popen``.
     """
@@ -459,17 +479,21 @@ def build_darktable_command(
     if not src.is_dir():
         raise DarktableMCPError(f"source_dir is not a directory: {src}")
 
-    # Validate rating args even though we don't apply them — surfaces bad
-    # input to the caller before we spawn the GUI.
-    _normalize_rating_range(rating, rating_min, rating_max)
+    rating_range = _normalize_rating_range(rating, rating_min, rating_max)
 
     cmd: List[str] = [
         darktable_path,
         "--conf", "plugins/lighttable/collect/num_rules=1",
         "--conf", f"plugins/lighttable/collect/item0={_DT_PROP_FILMROLL}",
         "--conf", "plugins/lighttable/collect/string0=%",
-        str(src),
     ]
+
+    if rating_range is not None:
+        lua = _build_filter_luacmd(*rating_range)
+        if lua is not None:
+            cmd += ["--luacmd", lua]
+
+    cmd.append(str(src))
     return cmd
 
 
@@ -481,13 +505,15 @@ def open_in_darktable(
     darktable_path: str = "darktable",
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Spawn darktable on ``source_dir`` and report the filter the caller should apply.
+    """Spawn darktable on ``source_dir``, pre-applying a rating filter when possible.
 
     Opening a folder via the CLI registers it as a film roll on first launch,
     and any XMP sidecars produced by ``apply_ratings_batch`` are picked up
-    automatically. The rating params do NOT pre-apply the filter (see
-    ``build_darktable_command`` for why); they're echoed back as a hint so
-    the caller knows which value to pick in the lighttable filter bar.
+    automatically. When an exact rating is requested (``rating=N`` or
+    ``rating_min == rating_max``), the lighttable opens already filtered
+    to that rating via the official Lua API
+    (``darktable.gui.libs.collect.filter``). Range requests (``rating_min !=
+    rating_max``) currently fall through to unfiltered with a hint.
 
     Args:
         source_dir: Folder containing raw files (with XMP sidecars next to them).
@@ -541,10 +567,14 @@ def format_open_summary(result: Mapping[str, Any]) -> str:
     lines = [head, " ".join(result["command"])]
     hint = result.get("filter_hint")
     if hint:
-        lines.append(
-            f"To filter to {hint}: in lighttable's top filter bar click the "
-            f"'all images' dropdown and pick {hint}. (Rating filter is not "
-            f"pre-applied — darktable's --conf for filter rules is too "
-            f"version-specific to bet on.)"
-        )
+        applied = any("--luacmd" == a for a in result["command"])
+        if applied:
+            lines.append(f"Rating filter pre-applied: {hint}")
+        else:
+            lines.append(
+                f"Rating range hint: {hint}. (Range pre-apply not yet "
+                f"supported — open the lighttable's filter bar to refine.)"
+            )
     return "\n".join(lines)
+
+

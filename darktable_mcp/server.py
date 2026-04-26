@@ -129,6 +129,33 @@ class DarktableMCPServer:
                 },
             ),
             Tool(
+                name="import_from_camera",
+                description=(
+                    "Import all photos from a connected camera into darktable. "
+                    "Detects the camera via libgphoto2, copies files locally, "
+                    "and registers them with the darktable library."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "destination": {
+                            "type": "string",
+                            "description": (
+                                "Target directory for copied files. "
+                                "Default: ~/Pictures/import-YYYY-MM-DD/"
+                            ),
+                        },
+                        "camera_port": {
+                            "type": "string",
+                            "description": (
+                                "gphoto2 port string (e.g. 'usb:002,002'). "
+                                "Required when multiple cameras are connected."
+                            ),
+                        },
+                    },
+                },
+            ),
+            Tool(
                 name="adjust_exposure",
                 description="Adjust exposure settings for photos (opens darktable GUI for preview)",
                 inputSchema={
@@ -200,6 +227,7 @@ class DarktableMCPServer:
             "view_photos": self._handle_view_photos,
             "rate_photos": self._handle_rate_photos,
             "import_batch": self._handle_import_batch,
+            "import_from_camera": self._handle_import_from_camera,
             "adjust_exposure": self._handle_adjust_exposure,
             "apply_preset": self._not_implemented("apply_preset"),
             "export_images": self._handle_export_images,
@@ -259,6 +287,14 @@ class DarktableMCPServer:
             return [TextContent(type="text", text=result)]
         except Exception as e:
             logger.error("import_batch failed: %s", e)
+            return [TextContent(type="text", text=f"Error: {e}")]
+
+    async def _handle_import_from_camera(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        try:
+            result = self.photo_tools.import_from_camera(arguments)
+            return [TextContent(type="text", text=result)]
+        except Exception as e:
+            logger.error("import_from_camera failed: %s", e)
             return [TextContent(type="text", text=f"Error: {e}")]
 
     async def _handle_adjust_exposure(self, arguments: Dict[str, Any]) -> List[TextContent]:

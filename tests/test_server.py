@@ -1,7 +1,7 @@
 """Tests for the main MCP server."""
 
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -149,6 +149,29 @@ def test_all_tools_implemented():
 
     for tool in stubbed_tools:
         assert tool in tools, f"Tool {tool} not found in server"
+
+
+@pytest.mark.asyncio
+async def test_import_from_camera_handler():
+    server = DarktableMCPServer()
+    mock_tools = Mock()
+    mock_tools.import_from_camera.return_value = (
+        "Imported 5 photos from /tmp/import-2026-04-26\n" "Source: Nikon DSC D800E (usb:002,002)"
+    )
+    server._photo_tools = mock_tools
+
+    result = await server._handle_import_from_camera({"destination": "/tmp/import-2026-04-26"})
+
+    assert len(result) == 1
+    assert "Imported 5 photos" in result[0].text
+    assert "Nikon DSC D800E" in result[0].text
+    mock_tools.import_from_camera.assert_called_once_with({"destination": "/tmp/import-2026-04-26"})
+
+
+def test_server_registers_import_from_camera_tool():
+    server = DarktableMCPServer()
+    tool_names = [t.name for t in server._tool_definitions()]
+    assert "import_from_camera" in tool_names
 
 
 def test_all_imports_work():

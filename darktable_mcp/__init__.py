@@ -1,4 +1,4 @@
-"""Darktable MCP Server - Model Context Protocol server for darktable integration."""
+"""Darktable MCP Server - Model Context Protocol server for darktable."""
 
 import asyncio
 import logging

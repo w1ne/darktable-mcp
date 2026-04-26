@@ -36,7 +36,7 @@ class LuaExecutor:
         darktable_path = shutil.which("darktable")
         if not darktable_path:
             raise DarktableNotFoundError(
-                "darktable executable not found in PATH. Please install darktable."
+                "darktable executable not found in PATH. " "Please install darktable."
             )
 
         return darktable_path
@@ -44,7 +44,7 @@ class LuaExecutor:
     def execute_script(
         self,
         script_content: str,
-        params: Dict[str, Any] = None,
+        params: Optional[Dict[str, Any]] = None,
         headless: bool = True,
         gui_purpose: Optional[str] = None,
     ) -> str:
@@ -69,7 +69,9 @@ class LuaExecutor:
         else:
             return self._execute_with_gui(script_content, params, gui_purpose)
 
-    def _execute_headless(self, script_content: str, params: Dict[str, Any] = None) -> str:
+    def _execute_headless(
+        self, script_content: str, params: Optional[Dict[str, Any]] = None
+    ) -> str:
         """Execute script in headless mode using lua interpreter.
 
         Args:
@@ -90,13 +92,17 @@ class LuaExecutor:
 
         # Inject library path and parameters into script
         param_lua = self._generate_param_lua(params)
-        script_with_setup = f"""dt = require("darktable")("--library", "{library_path}")
-{param_lua}
-{script_content}"""
+        script_with_setup = (
+            f'dt = require("darktable")("--library", "{library_path}")\n'
+            f"{param_lua}\n{script_content}"
+        )
 
         try:
             result = subprocess.run(
-                ["lua", "-e", script_with_setup], capture_output=True, text=True, timeout=30
+                ["lua", "-e", script_with_setup],
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
 
             if result.returncode != 0:
@@ -111,7 +117,10 @@ class LuaExecutor:
             raise DarktableLuaError(f"Failed to execute Lua script: {str(e)}")
 
     def _execute_with_gui(
-        self, script_content: str, params: Dict[str, Any] = None, gui_purpose: str = None
+        self,
+        script_content: str,
+        params: Optional[Dict[str, Any]] = None,
+        gui_purpose: Optional[str] = None,
     ) -> str:
         """Execute script with GUI (existing implementation).
 
@@ -177,7 +186,12 @@ class LuaExecutor:
 
         def escape_lua_string(s: str) -> str:
             """Escape special characters in Lua string literals."""
-            return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+            return (
+                s.replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+            )
 
         lua_lines = ["-- Injected parameters"]
         for key, value in params.items():
@@ -201,7 +215,9 @@ class LuaExecutor:
 
         return "\n".join(lua_lines)
 
-    def execute_script_file(self, script_path: Path, params: Dict[str, Any] = None) -> str:
+    def execute_script_file(
+        self, script_path: Path, params: Optional[Dict[str, Any]] = None
+    ) -> str:
         """Execute a Lua script file.
 
         Args:

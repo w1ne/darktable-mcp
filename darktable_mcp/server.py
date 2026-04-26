@@ -29,12 +29,14 @@ class DarktableMCPServer:
 
     @property
     def cli(self) -> CLIWrapper:
+        """Get CLI wrapper instance (lazy-loaded)."""
         if self._cli is None:
             self._cli = CLIWrapper()
         return self._cli
 
     @property
     def photo_tools(self) -> PhotoTools:
+        """Get photo tools instance (lazy-loaded)."""
         if self._photo_tools is None:
             self._photo_tools = PhotoTools()
         return self._photo_tools
@@ -62,24 +64,47 @@ class DarktableMCPServer:
         return [
             Tool(
                 name="view_photos",
-                description="Browse photos in your darktable library with filtering and rating options",
+                description="Browse photos in your darktable library with filtering/rating",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "filter": {"type": "string", "description": "Filter photos by filename"},
-                        "rating_min": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Minimum star rating"},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100, "description": "Maximum number of photos to return"},
+                        "filter": {
+                            "type": "string",
+                            "description": "Filter photos by filename",
+                        },
+                        "rating_min": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 5,
+                            "description": "Minimum star rating",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1000,
+                            "default": 100,
+                            "description": "Max photos to return",
+                        },
                     },
                 },
             ),
             Tool(
                 name="rate_photos",
-                description="Apply star ratings to photos in your darktable library",
+                description="Apply star ratings to photos in darktable library",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "photo_ids": {"type": "array", "items": {"type": "string"}, "description": "List of photo IDs to rate"},
-                        "rating": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Star rating to apply"},
+                        "photo_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of photo IDs to rate",
+                        },
+                        "rating": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 5,
+                            "description": "Star rating to apply",
+                        },
                     },
                     "required": ["photo_ids", "rating"],
                 },
@@ -90,8 +115,15 @@ class DarktableMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "source_path": {"type": "string", "description": "Path to directory containing photos"},
-                        "recursive": {"type": "boolean", "default": False, "description": "Import from subdirectories"},
+                        "source_path": {
+                            "type": "string",
+                            "description": "Path to directory containing photos",
+                        },
+                        "recursive": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Import from subdirectories",
+                        },
                     },
                     "required": ["source_path"],
                 },
@@ -102,8 +134,17 @@ class DarktableMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "photo_ids": {"type": "array", "items": {"type": "string"}, "description": "List of photo IDs to adjust"},
-                        "exposure_ev": {"type": "number", "minimum": -5.0, "maximum": 5.0, "description": "Exposure adjustment in EV"},
+                        "photo_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of photo IDs to adjust",
+                        },
+                        "exposure_ev": {
+                            "type": "number",
+                            "minimum": -5.0,
+                            "maximum": 5.0,
+                            "description": "Exposure adjustment in EV",
+                        },
                     },
                     "required": ["photo_ids", "exposure_ev"],
                 },
@@ -114,7 +155,10 @@ class DarktableMCPServer:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "photo_ids": {"type": "array", "items": {"type": "string"}},
+                        "photo_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
                         "preset_name": {"type": "string"},
                         "filter": {"type": "string"},
                     },
@@ -136,8 +180,15 @@ class DarktableMCPServer:
                             "description": "Absolute paths to source images",
                         },
                         "output_path": {"type": "string"},
-                        "format": {"type": "string", "enum": ["jpeg", "png", "tiff"]},
-                        "quality": {"type": "integer", "minimum": 1, "maximum": 100},
+                        "format": {
+                            "type": "string",
+                            "enum": ["jpeg", "png", "tiff"],
+                        },
+                        "quality": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                        },
                     },
                     "required": ["photo_ids", "output_path", "format"],
                 },
@@ -161,17 +212,25 @@ class DarktableMCPServer:
     @staticmethod
     def _not_implemented(name: str) -> ToolHandler:
         async def handler(_: Dict[str, Any]) -> List[TextContent]:
-            return [TextContent(
-                type="text",
-                text=f"{name} is not yet implemented.",
-            )]
+            return [
+                TextContent(
+                    type="text",
+                    text=f"{name} is not yet implemented.",
+                )
+            ]
+
         return handler
 
     async def _handle_view_photos(self, arguments: Dict[str, Any]) -> List[TextContent]:
         try:
             photos = self.photo_tools.view_photos(arguments)
             if not photos:
-                return [TextContent(type="text", text="No photos found matching criteria")]
+                return [
+                    TextContent(
+                        type="text",
+                        text="No photos found matching criteria",
+                    )
+                ]
 
             # Format results nicely
             result_lines = [f"Found {len(photos)} photos:"]
@@ -219,7 +278,12 @@ class DarktableMCPServer:
         if not output_path:
             return [TextContent(type="text", text="output_path is required")]
         if not photo_ids:
-            return [TextContent(type="text", text="photo_ids must contain at least one path")]
+            return [
+                TextContent(
+                    type="text",
+                    text="photo_ids must contain at least one path",
+                )
+            ]
 
         input_files = [Path(p) for p in photo_ids]
         results = self.cli.batch_export(
@@ -241,5 +305,6 @@ class DarktableMCPServer:
             )
 
     async def run(self) -> None:
+        """Run the MCP server using stdio transport."""
         logger.info("Starting Darktable MCP Server (stdio)")
         await self.start()

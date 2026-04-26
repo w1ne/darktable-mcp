@@ -1,6 +1,7 @@
 """Tests for PhotoTools module."""
 
-from unittest.mock import patch, Mock, ANY
+from unittest.mock import patch
+
 import pytest
 
 from darktable_mcp.tools.photo_tools import PhotoTools
@@ -12,7 +13,7 @@ class TestPhotoToolsViewPhotos:
 
     def test_view_photos_basic(self):
         """Test basic view_photos functionality."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
             mock_executor.execute_script.return_value = '[{"id": "123", "filename": "test.jpg"}]'
 
@@ -25,9 +26,11 @@ class TestPhotoToolsViewPhotos:
 
     def test_view_photos_with_filter(self):
         """Test view_photos with filename filter."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
-            mock_executor.execute_script.return_value = '[{"id": "456", "filename": "vacation.jpg"}]'
+            mock_executor.execute_script.return_value = (
+                '[{"id": "456", "filename": "vacation.jpg"}]'
+            )
 
             tools = PhotoTools()
             result = tools.view_photos({"filter": "vacation", "limit": 10})
@@ -38,9 +41,11 @@ class TestPhotoToolsViewPhotos:
 
     def test_view_photos_with_rating_min(self):
         """Test view_photos with minimum rating filter."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
-            mock_executor.execute_script.return_value = '[{"id": "789", "filename": "best.jpg", "rating": 4}]'
+            mock_executor.execute_script.return_value = (
+                '[{"id": "789", "filename": "best.jpg", "rating": 4}]'
+            )
 
             tools = PhotoTools()
             result = tools.view_photos({"filter": "", "rating_min": 4, "limit": 10})
@@ -51,9 +56,9 @@ class TestPhotoToolsViewPhotos:
 
     def test_view_photos_empty_result(self):
         """Test view_photos when no photos match."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
-            mock_executor.execute_script.return_value = '[]'
+            mock_executor.execute_script.return_value = "[]"
 
             tools = PhotoTools()
             result = tools.view_photos({"filter": "nonexistent", "limit": 10})
@@ -63,9 +68,9 @@ class TestPhotoToolsViewPhotos:
 
     def test_view_photos_json_parse_error(self):
         """Test view_photos handles JSON parsing errors."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
-            mock_executor.execute_script.return_value = 'invalid json'
+            mock_executor.execute_script.return_value = "invalid json"
 
             tools = PhotoTools()
             with pytest.raises(DarktableMCPError) as exc_info:
@@ -79,9 +84,9 @@ class TestPhotoToolsRatePhotos:
 
     def test_rate_photos_basic(self):
         """Test basic rate_photos functionality."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
-            mock_executor.execute_script.return_value = 'Updated 2 photos with 4 stars'
+            mock_executor.execute_script.return_value = "Updated 2 photos with 4 stars"
 
             tools = PhotoTools()
             result = tools.rate_photos({"photo_ids": ["123", "456"], "rating": 4})
@@ -91,7 +96,7 @@ class TestPhotoToolsRatePhotos:
 
     def test_rate_photos_missing_photo_ids(self):
         """Test rate_photos raises error when photo_ids missing."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             tools = PhotoTools()
             with pytest.raises(DarktableMCPError) as exc_info:
                 tools.rate_photos({"rating": 4})
@@ -100,7 +105,7 @@ class TestPhotoToolsRatePhotos:
 
     def test_rate_photos_empty_photo_ids(self):
         """Test rate_photos raises error when photo_ids is empty."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             tools = PhotoTools()
             with pytest.raises(DarktableMCPError) as exc_info:
                 tools.rate_photos({"photo_ids": [], "rating": 4})
@@ -109,7 +114,7 @@ class TestPhotoToolsRatePhotos:
 
     def test_rate_photos_invalid_rating_too_low(self):
         """Test rate_photos raises error for rating < 1."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             tools = PhotoTools()
             with pytest.raises(DarktableMCPError) as exc_info:
                 tools.rate_photos({"photo_ids": ["123"], "rating": 0})
@@ -118,7 +123,7 @@ class TestPhotoToolsRatePhotos:
 
     def test_rate_photos_invalid_rating_too_high(self):
         """Test rate_photos raises error for rating > 5."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             tools = PhotoTools()
             with pytest.raises(DarktableMCPError) as exc_info:
                 tools.rate_photos({"photo_ids": ["123"], "rating": 6})
@@ -127,9 +132,9 @@ class TestPhotoToolsRatePhotos:
 
     def test_rate_photos_single_photo(self):
         """Test rate_photos with a single photo."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
-            mock_executor.execute_script.return_value = 'Updated 1 photos with 5 stars'
+            mock_executor.execute_script.return_value = "Updated 1 photos with 5 stars"
 
             tools = PhotoTools()
             result = tools.rate_photos({"photo_ids": ["999"], "rating": 5})
@@ -143,9 +148,9 @@ class TestPhotoToolsImportBatch:
 
     def test_import_batch_basic(self):
         """Test basic import_batch functionality."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
-            mock_executor.execute_script.return_value = 'Imported 5 photos from /path/to/photos'
+            mock_executor.execute_script.return_value = "Imported 5 photos from /path/to/photos"
 
             tools = PhotoTools()
             result = tools.import_batch({"source_path": "/path/to/photos", "recursive": True})
@@ -155,7 +160,7 @@ class TestPhotoToolsImportBatch:
 
     def test_import_batch_missing_source_path(self):
         """Test import_batch raises error when source_path missing."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             tools = PhotoTools()
             with pytest.raises(DarktableMCPError) as exc_info:
                 tools.import_batch({"recursive": True})
@@ -164,9 +169,9 @@ class TestPhotoToolsImportBatch:
 
     def test_import_batch_non_recursive(self):
         """Test import_batch with recursive=False."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
-            mock_executor.execute_script.return_value = 'Imported 3 photos from /path/to/photos'
+            mock_executor.execute_script.return_value = "Imported 3 photos from /path/to/photos"
 
             tools = PhotoTools()
             result = tools.import_batch({"source_path": "/path/to/photos", "recursive": False})
@@ -176,9 +181,9 @@ class TestPhotoToolsImportBatch:
 
     def test_import_batch_default_recursive(self):
         """Test import_batch defaults recursive to False."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
-            mock_executor.execute_script.return_value = 'Imported 2 photos from /path/to/photos'
+            mock_executor.execute_script.return_value = "Imported 2 photos from /path/to/photos"
 
             tools = PhotoTools()
             result = tools.import_batch({"source_path": "/path/to/photos"})
@@ -192,15 +197,12 @@ class TestPhotoToolsAdjustExposure:
 
     def test_adjust_exposure_basic(self):
         """Test basic adjust_exposure functionality."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
-            mock_executor.execute_script.return_value = 'Adjusted exposure for 2 photos'
+            mock_executor.execute_script.return_value = "Adjusted exposure for 2 photos"
 
             tools = PhotoTools()
-            result = tools.adjust_exposure({
-                "photo_ids": ["123", "456"],
-                "exposure_ev": 1.5
-            })
+            result = tools.adjust_exposure({"photo_ids": ["123", "456"], "exposure_ev": 1.5})
 
             assert "Adjusted exposure" in result
             # Verify GUI mode was used (headless=False)
@@ -211,7 +213,7 @@ class TestPhotoToolsAdjustExposure:
 
     def test_adjust_exposure_validation_too_high(self):
         """Test adjust_exposure raises error for exposure > 5.0."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             tools = PhotoTools()
             with pytest.raises(DarktableMCPError) as exc_info:
                 tools.adjust_exposure({"photo_ids": ["123"], "exposure_ev": 6.0})
@@ -220,7 +222,7 @@ class TestPhotoToolsAdjustExposure:
 
     def test_adjust_exposure_validation_too_low(self):
         """Test adjust_exposure raises error for exposure < -5.0."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             tools = PhotoTools()
             with pytest.raises(DarktableMCPError) as exc_info:
                 tools.adjust_exposure({"photo_ids": ["123"], "exposure_ev": -6.0})
@@ -229,7 +231,7 @@ class TestPhotoToolsAdjustExposure:
 
     def test_adjust_exposure_missing_photo_ids(self):
         """Test adjust_exposure raises error when photo_ids missing."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             tools = PhotoTools()
             with pytest.raises(DarktableMCPError) as exc_info:
                 tools.adjust_exposure({"exposure_ev": 1.0})
@@ -238,9 +240,9 @@ class TestPhotoToolsAdjustExposure:
 
     def test_adjust_exposure_single_photo(self):
         """Test adjust_exposure with a single photo."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
-            mock_executor.execute_script.return_value = 'Adjusted exposure for 1 photos by 2.0 EV'
+            mock_executor.execute_script.return_value = "Adjusted exposure for 1 photos by 2.0 EV"
 
             tools = PhotoTools()
             result = tools.adjust_exposure({"photo_ids": ["999"], "exposure_ev": 2.0})
@@ -250,9 +252,9 @@ class TestPhotoToolsAdjustExposure:
 
     def test_adjust_exposure_boundary_values(self):
         """Test adjust_exposure with boundary exposure values."""
-        with patch('darktable_mcp.tools.photo_tools.LuaExecutor') as MockExecutor:
+        with patch("darktable_mcp.tools.photo_tools.LuaExecutor") as MockExecutor:
             mock_executor = MockExecutor.return_value
-            mock_executor.execute_script.return_value = 'Adjusted exposure for 1 photos by 5.0 EV'
+            mock_executor.execute_script.return_value = "Adjusted exposure for 1 photos by 5.0 EV"
 
             tools = PhotoTools()
             # Test max value
@@ -260,6 +262,6 @@ class TestPhotoToolsAdjustExposure:
             assert "Adjusted exposure" in result
 
             # Test min value
-            mock_executor.execute_script.return_value = 'Adjusted exposure for 1 photos by -5.0 EV'
+            mock_executor.execute_script.return_value = "Adjusted exposure for 1 photos by -5.0 EV"
             result = tools.adjust_exposure({"photo_ids": ["123"], "exposure_ev": -5.0})
             assert "Adjusted exposure" in result

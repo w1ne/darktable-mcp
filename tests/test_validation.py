@@ -1,19 +1,19 @@
 """Tests for darktable_mcp.utils.validation module."""
 
-import os
 import re
 import tempfile
 from pathlib import Path
+
 import pytest
 
+from darktable_mcp.utils.errors import InvalidRatingError, ValidationError
 from darktable_mcp.utils.validation import (
-    validate_rating,
-    validate_file_path,
     validate_directory_path,
+    validate_file_path,
     validate_image_extensions,
     validate_preset_name,
+    validate_rating,
 )
-from darktable_mcp.utils.errors import ValidationError, InvalidRatingError
 
 
 class TestValidateRating:
@@ -153,8 +153,14 @@ class TestValidateImageExtensions:
     def test_valid_image_extensions(self):
         """Test with valid image file extensions."""
         files = [
-            "photo.jpg", "image.jpeg", "picture.png", "scan.tiff",
-            "raw.cr2", "photo.nef", "image.arw", "picture.dng"
+            "photo.jpg",
+            "image.jpeg",
+            "picture.png",
+            "scan.tiff",
+            "raw.cr2",
+            "photo.nef",
+            "image.arw",
+            "picture.dng",
         ]
         result = validate_image_extensions(files)
         assert result == files
@@ -162,11 +168,11 @@ class TestValidateImageExtensions:
     def test_mixed_extensions(self):
         """Test with mix of valid and invalid extensions."""
         files = [
-            "photo.jpg",      # valid
-            "document.txt",   # invalid
-            "image.png",      # valid
-            "video.mp4",      # invalid
-            "raw.cr2"         # valid
+            "photo.jpg",  # valid
+            "document.txt",  # invalid
+            "image.png",  # valid
+            "video.mp4",  # invalid
+            "raw.cr2",  # valid
         ]
         expected = ["photo.jpg", "image.png", "raw.cr2"]
         result = validate_image_extensions(files)
@@ -192,15 +198,16 @@ class TestValidateImageExtensions:
     def test_various_raw_formats(self):
         """Test various RAW file formats."""
         raw_files = [
-            "canon.cr2", "canon.cr3",        # Canon
-            "nikon.nef",                     # Nikon
-            "sony.arw",                      # Sony
-            "adobe.dng",                     # Adobe DNG
-            "fuji.raf",                      # Fujifilm
-            "olympus.orf",                   # Olympus
-            "panasonic.rw2",                 # Panasonic
-            "pentax.pef",                    # Pentax
-            "samsung.srw"                    # Samsung
+            "canon.cr2",
+            "canon.cr3",  # Canon
+            "nikon.nef",  # Nikon
+            "sony.arw",  # Sony
+            "adobe.dng",  # Adobe DNG
+            "fuji.raf",  # Fujifilm
+            "olympus.orf",  # Olympus
+            "panasonic.rw2",  # Panasonic
+            "pentax.pef",  # Pentax
+            "samsung.srw",  # Samsung
         ]
         result = validate_image_extensions(raw_files)
         assert result == raw_files
@@ -217,7 +224,7 @@ class TestValidatePresetName:
             "Black-and-White",
             "High_Contrast",
             "Vintage Look 2024",
-            "Studio-Lighting_v2"
+            "Studio-Lighting_v2",
         ]
         for name in valid_names:
             result = validate_preset_name(name)
@@ -241,15 +248,17 @@ class TestValidatePresetName:
     def test_invalid_characters(self):
         """Test preset names with invalid characters."""
         invalid_names = [
-            "Portrait@Studio",      # @ symbol
-            "Black&White",          # & symbol
-            "High.Contrast",        # . symbol
-            "Portrait/Landscape",   # / symbol
-            "Mode#1",              # # symbol
-            "Vintage*Look"         # * symbol
+            "Portrait@Studio",  # @ symbol
+            "Black&White",  # & symbol
+            "High.Contrast",  # . symbol
+            "Portrait/Landscape",  # / symbol
+            "Mode#1",  # # symbol
+            "Vintage*Look",  # * symbol
         ]
         for name in invalid_names:
-            with pytest.raises(ValidationError, match=f"Invalid preset name format: {re.escape(name)}"):
+            with pytest.raises(
+                ValidationError, match=f"Invalid preset name format: {re.escape(name)}"
+            ):
                 validate_preset_name(name)
 
     def test_numbers_allowed(self):

@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List
 
 from ..darktable.lua_executor import LuaExecutor
 from ..utils.errors import DarktableMCPError, DarktableNotFoundError
@@ -11,21 +11,21 @@ logger = logging.getLogger(__name__)
 
 
 class PhotoTools:
-    """Provides high-level photo management operations using darktable Lua API."""
+    """High-level photo management operations using darktable Lua API."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize PhotoTools with a LuaExecutor instance.
 
         Raises:
-            DarktableMCPError: If darktable is not properly installed or configured
+            DarktableMCPError: If darktable not properly configured
         """
         try:
             self.lua_executor = LuaExecutor()
         except DarktableNotFoundError as e:
             raise DarktableMCPError(
                 f"darktable setup error: {e}. "
-                "Please ensure darktable is installed and you've opened it at least once."
-            )
+                "Please ensure darktable is installed and opened once."
+            ) from e
 
     def view_photos(self, arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         """View photos from darktable library with optional filtering.
@@ -54,7 +54,7 @@ class PhotoTools:
         if rating_min is not None:
             params["rating_min"] = rating_min
 
-        script = '''
+        script = """
         photos = {}
         count = 0
         for _, image in ipairs(dt.database) do
@@ -84,7 +84,7 @@ class PhotoTools:
         end
 
         print(dt.json.encode(photos))
-        '''
+        """
 
         result = self.lua_executor.execute_script(script, params=params, headless=True)
         try:
@@ -92,13 +92,13 @@ class PhotoTools:
             if not isinstance(photos, list):
                 raise DarktableMCPError("Expected list of photos from darktable")
             return photos
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
             # Log the raw result for debugging
-            logger.error(f"Failed to parse darktable response: {result}")
+            logger.error("Failed to parse darktable response: %s", result)
             raise DarktableMCPError(
                 "Failed to parse photo data from darktable. "
                 "Please check that darktable is properly configured."
-            )
+            ) from exc
 
     def rate_photos(self, arguments: Dict[str, Any]) -> str:
         """Rate photos in darktable library.
@@ -129,7 +129,7 @@ class PhotoTools:
             "rating": rating,
         }
 
-        script = '''
+        script = """
         local updated_count = 0
 
         for _, photo_id in ipairs(photo_ids) do
@@ -141,7 +141,7 @@ class PhotoTools:
         end
 
         print("Updated " .. updated_count .. " photos with " .. rating .. " stars")
-        '''
+        """
 
         return self.lua_executor.execute_script(script, params=params, headless=True)
 
@@ -171,10 +171,10 @@ class PhotoTools:
             "recursive": recursive,
         }
 
-        script = '''
+        script = """
         local imported_files = dt.database.import(source_path, recursive)
         print("Imported " .. #imported_files .. " photos from " .. source_path)
-        '''
+        """
 
         return self.lua_executor.execute_script(script, params=params, headless=True)
 
@@ -207,7 +207,7 @@ class PhotoTools:
             "exposure_ev": exposure_ev,
         }
 
-        script = '''
+        script = """
         local adjusted_count = 0
 
         -- Process each photo
@@ -226,12 +226,12 @@ class PhotoTools:
         end
 
         print("Adjusted exposure for " .. adjusted_count .. " photos by " .. exposure_ev .. " EV")
-        '''
+        """
 
         # Use GUI mode since user needs to see the adjustments
         return self.lua_executor.execute_script(
             script,
             params=params,
             headless=False,
-            gui_purpose="Show exposure adjustment preview"
+            gui_purpose="Show exposure adjustment preview",
         )

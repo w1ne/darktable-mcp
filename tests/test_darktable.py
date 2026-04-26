@@ -1,26 +1,26 @@
 """Tests for darktable integration layer."""
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
-from pathlib import Path
+from unittest.mock import Mock, patch
 
-from darktable_mcp.darktable.lua_executor import LuaExecutor
+import pytest
+
 from darktable_mcp.darktable.cli_wrapper import CLIWrapper
-from darktable_mcp.utils.errors import DarktableNotFoundError, DarktableLuaError
+from darktable_mcp.darktable.lua_executor import LuaExecutor
+from darktable_mcp.utils.errors import DarktableLuaError, DarktableNotFoundError
 
 
 class TestLuaExecutor:
     """Test cases for LuaExecutor."""
 
-    @patch('shutil.which')
+    @patch("shutil.which")
     def test_lua_executor_init(self, mock_which):
         """Test LuaExecutor can be initialized."""
         mock_which.return_value = "/usr/bin/darktable"
         executor = LuaExecutor()
         assert executor is not None
 
-    @patch('subprocess.run')
-    @patch('shutil.which')
+    @patch("subprocess.run")
+    @patch("shutil.which")
     def test_execute_lua_script_success(self, mock_which, mock_run):
         """Test successful Lua script execution."""
         mock_which.return_value = "/usr/bin/darktable"
@@ -32,8 +32,8 @@ class TestLuaExecutor:
         assert result == "success"
         mock_run.assert_called_once()
 
-    @patch('subprocess.run')
-    @patch('shutil.which')
+    @patch("subprocess.run")
+    @patch("shutil.which")
     def test_execute_lua_script_failure(self, mock_which, mock_run):
         """Test Lua script execution failure."""
         mock_which.return_value = "/usr/bin/darktable"
@@ -48,14 +48,14 @@ class TestLuaExecutor:
 class TestCLIWrapper:
     """Test cases for CLIWrapper."""
 
-    @patch('shutil.which')
+    @patch("shutil.which")
     def test_cli_wrapper_init(self, mock_which):
         """Test CLIWrapper can be initialized."""
         mock_which.return_value = "/usr/bin/darktable-cli"
         wrapper = CLIWrapper()
         assert wrapper is not None
 
-    @patch('shutil.which')
+    @patch("shutil.which")
     def test_check_darktable_not_found(self, mock_which):
         """Test darktable executable not found."""
         mock_which.side_effect = ["/usr/bin/darktable-cli", None]
@@ -65,7 +65,7 @@ class TestCLIWrapper:
         with pytest.raises(DarktableNotFoundError):
             wrapper.check_darktable_available()
 
-    @patch('shutil.which')
+    @patch("shutil.which")
     def test_check_darktable_found(self, mock_which):
         """Test darktable executable found."""
         mock_which.side_effect = ["/usr/bin/darktable-cli", "/usr/bin/darktable"]

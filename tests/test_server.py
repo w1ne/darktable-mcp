@@ -37,8 +37,9 @@ class TestDarktableMCPServer:
         async def fake_stdio():
             yield (AsyncMock(), AsyncMock())
 
-        with patch("darktable_mcp.server.stdio_server", fake_stdio), \
-             patch.object(server.app, "run", new=AsyncMock(return_value=None)) as mock_run:
+        with patch("darktable_mcp.server.stdio_server", fake_stdio), patch.object(
+            server.app, "run", new=AsyncMock(return_value=None)
+        ) as mock_run:
             await server.start()
             mock_run.assert_called_once()
 
@@ -50,7 +51,7 @@ class TestToolHandlers:
     async def test_view_photos_integration(self):
         server = DarktableMCPServer()
 
-        with patch('darktable_mcp.tools.photo_tools.PhotoTools') as MockPhotoTools:
+        with patch("darktable_mcp.tools.photo_tools.PhotoTools") as MockPhotoTools:
             mock_tools = MockPhotoTools.return_value
             mock_tools.view_photos.return_value = [{"id": "123", "filename": "test.jpg"}]
 
@@ -67,7 +68,7 @@ class TestToolHandlers:
     async def test_rate_photos_integration(self):
         server = DarktableMCPServer()
 
-        with patch('darktable_mcp.tools.photo_tools.PhotoTools') as MockPhotoTools:
+        with patch("darktable_mcp.tools.photo_tools.PhotoTools") as MockPhotoTools:
             mock_tools = MockPhotoTools.return_value
             mock_tools.rate_photos.return_value = "Updated 2 photos with 4 stars"
 
@@ -83,7 +84,7 @@ class TestToolHandlers:
     async def test_import_batch_integration(self):
         server = DarktableMCPServer()
 
-        with patch('darktable_mcp.tools.photo_tools.PhotoTools') as MockPhotoTools:
+        with patch("darktable_mcp.tools.photo_tools.PhotoTools") as MockPhotoTools:
             mock_tools = MockPhotoTools.return_value
             mock_tools.import_batch.return_value = "Imported 5 photos from /path/to/photos"
 
@@ -99,13 +100,15 @@ class TestToolHandlers:
     async def test_adjust_exposure_integration(self):
         server = DarktableMCPServer()
 
-        with patch('darktable_mcp.tools.photo_tools.PhotoTools') as MockPhotoTools:
+        with patch("darktable_mcp.tools.photo_tools.PhotoTools") as MockPhotoTools:
             mock_tools = MockPhotoTools.return_value
             mock_tools.adjust_exposure.return_value = "Adjusted exposure for 2 photos by 1.5 EV"
 
             server._photo_tools = mock_tools
 
-            result = await server._handle_adjust_exposure({"photo_ids": ["123", "456"], "exposure_ev": 1.5})
+            result = await server._handle_adjust_exposure(
+                {"photo_ids": ["123", "456"], "exposure_ev": 1.5}
+            )
 
             assert len(result) == 1
             assert "Adjusted exposure" in result[0].text
@@ -115,7 +118,7 @@ class TestToolHandlers:
     async def test_view_photos_no_results(self):
         server = DarktableMCPServer()
 
-        with patch('darktable_mcp.tools.photo_tools.PhotoTools') as MockPhotoTools:
+        with patch("darktable_mcp.tools.photo_tools.PhotoTools") as MockPhotoTools:
             mock_tools = MockPhotoTools.return_value
             mock_tools.view_photos.return_value = []
 
@@ -132,7 +135,13 @@ def test_all_tools_implemented():
     server = DarktableMCPServer()
     tools = server.list_tools()
 
-    implemented_tools = ["view_photos", "rate_photos", "import_batch", "adjust_exposure", "export_images"]
+    implemented_tools = [
+        "view_photos",
+        "rate_photos",
+        "import_batch",
+        "adjust_exposure",
+        "export_images",
+    ]
     stubbed_tools = ["apply_preset"]
 
     for tool in implemented_tools:
@@ -144,9 +153,9 @@ def test_all_tools_implemented():
 
 def test_all_imports_work():
     """Verify all core module imports work correctly."""
-    from darktable_mcp.server import DarktableMCPServer
-    from darktable_mcp.darktable.lua_executor import LuaExecutor
     from darktable_mcp.darktable.library_detector import LibraryDetector
+    from darktable_mcp.darktable.lua_executor import LuaExecutor
+    from darktable_mcp.server import DarktableMCPServer
     from darktable_mcp.tools.photo_tools import PhotoTools
 
     # All imports should work without errors

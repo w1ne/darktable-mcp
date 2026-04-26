@@ -3,9 +3,9 @@
 import os
 import re
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Union
 
-from .errors import ValidationError, InvalidRatingError
+from .errors import InvalidRatingError, ValidationError
 
 
 def validate_rating(rating: Union[int, str]) -> int:
@@ -84,9 +84,23 @@ def validate_image_extensions(files: List[str]) -> List[str]:
         List[str]: Filtered list of valid image files
     """
     supported_extensions = {
-        '.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp',
-        '.raw', '.cr2', '.cr3', '.nef', '.arw', '.dng',
-        '.raf', '.orf', '.rw2', '.pef', '.srw'
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".tiff",
+        ".tif",
+        ".bmp",
+        ".raw",
+        ".cr2",
+        ".cr3",
+        ".nef",
+        ".arw",
+        ".dng",
+        ".raf",
+        ".orf",
+        ".rw2",
+        ".pef",
+        ".srw",
     }
 
     valid_files = []
@@ -114,7 +128,7 @@ def validate_preset_name(preset: str) -> str:
         raise ValidationError("Preset name cannot be empty")
 
     # Basic validation - alphanumeric, spaces, hyphens, underscores
-    if not re.match(r'^[a-zA-Z0-9\s\-_]+$', preset):
+    if not re.match(r"^[a-zA-Z0-9\s\-_]+$", preset):
         raise ValidationError(f"Invalid preset name format: {preset}")
 
     return preset.strip()

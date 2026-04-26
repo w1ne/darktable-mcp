@@ -6,12 +6,12 @@ from ..utils.errors import DarktableNotFoundError
 
 
 class LibraryDetector:
-    """Detects the darktable library database path across different platforms."""
+    """Detects the darktable library database path across platforms."""
 
     def find_library(self) -> str:
         """Find the darktable library database path.
 
-        Searches for the darktable library database in platform-specific locations:
+        Searches for the darktable library database in locations:
         - Linux: ~/.config/darktable/library.db
         - macOS: ~/Library/Application Support/darktable/library.db
         - Windows: ~/AppData/Local/darktable/library.db
@@ -33,5 +33,5 @@ class LibraryDetector:
                 return str(path)
 
         raise DarktableNotFoundError(
-            "Please make sure darktable is installed and you've imported some photos first"
+            "Please make sure darktable is installed and you've " "imported some photos first"
         )

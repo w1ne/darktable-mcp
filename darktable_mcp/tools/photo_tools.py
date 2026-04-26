@@ -4,7 +4,8 @@ import json
 import logging
 import re
 import subprocess
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 from ..darktable.lua_executor import LuaExecutor
 from ..utils.errors import DarktableMCPError, DarktableNotFoundError
@@ -74,6 +75,58 @@ class PhotoTools:
                 f"gphoto2 exited with code {result.returncode}: " f"{result.stderr.strip()[:200]}"
             )
         return cameras
+
+    def _download_from_camera(
+        self, model: str, port: str, destination: Path
+    ) -> Tuple[int, List[str]]:
+        """Run gphoto2 to copy all files from a camera to destination.
+
+        Args:
+            model: gphoto2 model string (e.g. "Nikon DSC D800E").
+            port: gphoto2 port string (e.g. "usb:002,002").
+            destination: directory to write files into. Created if missing.
+
+        Returns:
+            Tuple of (files_downloaded, error_messages). On partial failure
+            (gphoto2 non-zero exit but some files saved), returns the count
+            of saved files and any stderr lines as errors.
+
+        Raises:
+            DarktableMCPError: if gphoto2 binary is not installed.
+        """
+        destination.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            "gphoto2",
+            "--camera",
+            model,
+            "--port",
+            port,
+            "--get-all-files",
+            "--filename",
+            f"{destination}/%f",
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        except FileNotFoundError as exc:
+            raise DarktableMCPError(
+                "gphoto2 not installed. Install with `apt install gphoto2`."
+            ) from exc
+
+        # Count "Saving file as ..." lines on stdout
+        count = sum(1 for line in result.stdout.splitlines() if "Saving file as" in line)
+
+        errors: List[str] = []
+        if result.returncode != 0:
+            errors.extend(line for line in result.stderr.splitlines() if line.strip())
+
+        return count, errors
 
     def view_photos(self, arguments: Dict[str, Any]) -> List[Dict[str, Any]]:
         """View photos from darktable library with optional filtering.

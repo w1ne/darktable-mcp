@@ -361,3 +361,57 @@ class TestPhotoToolsDetectCameras:
         tools = PhotoTools()
         with pytest.raises(DarktableMCPError, match="Could not lock"):
             tools._detect_cameras()
+
+
+class TestPhotoToolsDownloadFromCamera:
+    """Tests for PhotoTools._download_from_camera helper."""
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_download_success(self, mock_run, _mock_executor, tmp_path):
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout=(
+                "Saving file as /tmp/dest/IMG_0001.NEF\n"
+                "Saving file as /tmp/dest/IMG_0002.NEF\n"
+                "Saving file as /tmp/dest/IMG_0003.NEF\n"
+            ),
+            stderr="",
+        )
+        tools = PhotoTools()
+        count, errors = tools._download_from_camera("Nikon DSC D800E", "usb:002,002", tmp_path)
+        assert count == 3
+        assert errors == []
+
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "gphoto2"
+        assert "--camera" in cmd
+        assert "Nikon DSC D800E" in cmd
+        assert "--port" in cmd
+        assert "usb:002,002" in cmd
+        assert "--get-all-files" in cmd
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_download_partial_failure(self, mock_run, _mock_executor, tmp_path):
+        mock_run.return_value = Mock(
+            returncode=1,
+            stdout=(
+                "Saving file as /tmp/dest/IMG_0001.NEF\n" "Saving file as /tmp/dest/IMG_0002.NEF\n"
+            ),
+            stderr="ERROR: Could not download IMG_0003.NEF\n",
+        )
+        tools = PhotoTools()
+        count, errors = tools._download_from_camera("Nikon DSC D800E", "usb:002,002", tmp_path)
+        assert count == 2
+        assert any("IMG_0003" in e for e in errors)
+
+    @patch("darktable_mcp.tools.photo_tools.LuaExecutor")
+    @patch("darktable_mcp.tools.photo_tools.subprocess.run")
+    def test_download_creates_destination(self, mock_run, _mock_executor, tmp_path):
+        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+        target = tmp_path / "new_dir"
+        tools = PhotoTools()
+        tools._download_from_camera("Nikon DSC D800E", "usb:002,002", target)
+        assert target.exists()
+        assert target.is_dir()

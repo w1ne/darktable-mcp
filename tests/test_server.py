@@ -22,6 +22,7 @@ class TestDarktableMCPServer:
             "view_photos",
             "rate_photos",
             "import_batch",
+            "import_from_camera",
             "adjust_exposure",
             "apply_preset",
             "export_images",
@@ -139,6 +140,7 @@ def test_all_tools_implemented():
         "view_photos",
         "rate_photos",
         "import_batch",
+        "import_from_camera",
         "adjust_exposure",
         "export_images",
     ]

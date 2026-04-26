@@ -131,6 +131,7 @@ class DarktableMCPServer:
             Tool(
                 name="import_from_camera",
                 description=(
+                    "Use when a camera or memory card is physically connected. "
                     "Import all photos from a connected camera into darktable. "
                     "Detects the camera via libgphoto2, copies files locally, "
                     "and registers them with the darktable library."

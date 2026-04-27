@@ -10,7 +10,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from .darktable.cli_wrapper import CLIWrapper
-from .tools.photo_tools import PhotoTools
+from .tools.camera_tools import CameraTools
 from .tools.preview_tools import (
     apply_ratings_batch,
     extract_previews,
@@ -32,7 +32,7 @@ class DarktableMCPServer:
     def __init__(self) -> None:
         self.app: Server = Server("darktable-mcp")
         self._cli: Optional[CLIWrapper] = None
-        self._photo_tools: Optional[PhotoTools] = None
+        self._camera_tools: Optional[CameraTools] = None
         self._handler_map: Dict[str, ToolHandler] = self._build_handlers()
         self._setup_tools()
 
@@ -44,11 +44,11 @@ class DarktableMCPServer:
         return self._cli
 
     @property
-    def photo_tools(self) -> PhotoTools:
-        """Get photo tools instance (lazy-loaded)."""
-        if self._photo_tools is None:
-            self._photo_tools = PhotoTools()
-        return self._photo_tools
+    def camera_tools(self) -> CameraTools:
+        """Get camera tools instance (lazy-loaded)."""
+        if self._camera_tools is None:
+            self._camera_tools = CameraTools()
+        return self._camera_tools
 
     def _setup_tools(self) -> None:
         @self.app.list_tools()
@@ -295,7 +295,7 @@ class DarktableMCPServer:
 
     async def _handle_import_from_camera(self, arguments: Dict[str, Any]) -> List[TextContent]:
         try:
-            result = self.photo_tools.import_from_camera(arguments)
+            result = self.camera_tools.import_from_camera(arguments)
             return [TextContent(type="text", text=result)]
         except Exception as e:
             logger.error("import_from_camera failed: %s", e)

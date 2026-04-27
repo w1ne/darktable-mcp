@@ -50,7 +50,7 @@ async def test_import_from_camera_handler():
         "Copied 5 file(s) from Nikon DSC D800E (usb:002,002)\n"
         "Destination: /tmp/import-2026-04-26"
     )
-    server._photo_tools = mock_tools
+    server._camera_tools = mock_tools
 
     result = await server._handle_import_from_camera({"destination": "/tmp/import-2026-04-26"})
 

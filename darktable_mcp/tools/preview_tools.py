@@ -1,9 +1,9 @@
 """Vision-rating workflow: extract auto-rotated previews and apply ratings via XMP sidecars.
 
-This module is the "rate by vision" companion to PhotoTools. It works on raw
-files BEFORE they're imported into darktable's library — so it never touches
-the SQLite DB and doesn't need the Lua API. After ratings are applied, opening
-the directory in darktable picks up the XMP sidecars on import.
+Operates on raw files BEFORE they are imported into darktable's library, so it
+never touches the SQLite DB and doesn't need the Lua API. Extracts previews,
+writes XMP sidecars (xmp:Rating) next to the raws, and can launch the darktable
+GUI on the directory — sidecars are picked up automatically on import.
 """
 
 from __future__ import annotations

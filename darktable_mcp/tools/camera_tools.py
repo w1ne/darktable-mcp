@@ -1,4 +1,4 @@
-"""Photo tools for managing photos in darktable library."""
+"""Camera-import tooling using libgphoto2."""
 
 import os
 import re
@@ -10,8 +10,10 @@ from typing import Any, Dict, List, Tuple
 from ..utils.errors import DarktableMCPError
 
 
-class PhotoTools:
-    """High-level photo management operations using darktable Lua API."""
+class CameraTools:
+    """Camera import via gphoto2 (libgphoto2 — same library darktable's GUI uses)."""
+
+    DOWNLOAD_TIMEOUT_DEFAULT = 3600
 
     def _detect_cameras(self) -> List[Dict[str, str]]:
         """Run `gphoto2 --auto-detect` and return parsed list of cameras.
@@ -58,8 +60,6 @@ class PhotoTools:
                 f"gphoto2 exited with code {result.returncode}: " f"{result.stderr.strip()[:200]}"
             )
         return cameras
-
-    DOWNLOAD_TIMEOUT_DEFAULT = 3600
 
     def _download_from_camera(
         self,

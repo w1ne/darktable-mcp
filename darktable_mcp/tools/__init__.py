@@ -1,5 +1,5 @@
 """Tools module for darktable photo management."""
 
-from .photo_tools import PhotoTools
+from .camera_tools import CameraTools
 
-__all__ = ["PhotoTools"]
+__all__ = ["CameraTools"]

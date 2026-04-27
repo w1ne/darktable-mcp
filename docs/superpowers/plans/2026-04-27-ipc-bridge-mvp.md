@@ -659,7 +659,9 @@ git commit -m "feat(bridge): file-based JSON request/response client to darktabl
 - Create: `tests/lua/test_dispatcher.lua`
 - Create: `tests/test_lua_dispatcher.py`
 
-The dispatcher logic (method registry, request parsing, response shape, file I/O) is testable in plain Lua with a stub `dt` table. The worker loop / `dt.control.async` / `dt.control.sleep` are darktable-runtime concerns covered by Task 0 spike + Task 6 manual smoke test, not by these unit tests.
+The dispatcher logic (method registry, request parsing, response shape, file I/O) is testable in plain Lua with a stub `dt` table. The worker loop / `dt.control.dispatch` / `dt.control.sleep` are darktable-runtime concerns covered by Task 0 spike + Task 6 manual smoke test, not by these unit tests.
+
+**API NOTE FROM TASK 0 SPIKE:** The spec originally named the primitive `dt.control.async`, but the empirical spike confirmed the actual symbol in darktable 5.4.1 is `dt.control.dispatch`. Use `dt.control.dispatch` in the plugin code below. If you encounter `dt.control.async` anywhere else in the spec or older drafts, mentally substitute `dispatch` — they refer to the same fire-and-forget non-blocking-worker primitive.
 
 - [ ] **Step 1: Write the failing Lua tests**
 
@@ -1146,8 +1148,8 @@ end
 -- ---- Entry point -----------------------------------------------------------
 
 dt.print_log("darktable-mcp bridge: ready")
-if dt.control and dt.control.async then
-  dt.control.async(worker_loop)
+if dt.control and dt.control.dispatch then
+  dt.control.dispatch(worker_loop)
 end
 
 -- ---- Test exports (used by tests/lua/test_dispatcher.lua) ------------------

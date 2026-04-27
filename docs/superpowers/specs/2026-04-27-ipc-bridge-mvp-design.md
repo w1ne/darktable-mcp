@@ -22,7 +22,7 @@ This is iteration 2. It builds the smallest version of that unblocker that ships
 4. MCP tool registrations for `view_photos` and `rate_photos` in `server.py`, wired through the bridge.
 5. CLI commands: `darktable-mcp install-plugin` and `darktable-mcp uninstall-plugin`. Idempotent.
 6. Tests: Lua dispatcher unit tests against a stub `dt` table; Python bridge tests against a fake plugin worker; MCP handler tests with a mocked bridge; install command filesystem tests; manual end-to-end smoke test documented in the plan.
-7. A Task 0 spike before any implementation work to verify darktable's Lua worker primitive (`darktable.control.async` / `dt.control.sleep` or equivalent) actually runs a non-blocking loop without freezing the GUI.
+7. A Task 0 spike before any implementation work to verify darktable's Lua worker primitive (`darktable.control.dispatch` / `dt.control.sleep` or equivalent) actually runs a non-blocking loop without freezing the GUI.
 
 **Out of scope (future iterations):**
 
@@ -65,7 +65,7 @@ This is iteration 2. It builds the smallest version of that unblocker that ships
 Lives inside the Python package; copied into `~/.config/darktable/lua/` by `install-plugin`. Loaded by darktable when `~/.config/darktable/luarc` does `require "darktable_mcp"`.
 
 Responsibilities:
-- On load, create the cache directory if missing, log readiness via `darktable.print_log`, spawn the worker via `darktable.control.async(worker_loop)` (exact primitive confirmed by Task 0 spike).
+- On load, create the cache directory if missing, log readiness via `darktable.print_log`, spawn the worker via `darktable.control.dispatch(worker_loop)` (exact primitive confirmed by Task 0 spike).
 - `worker_loop` is `while true do scan_dir(); dt.control.sleep(100); end`.
 - `scan_dir` walks `request-*.json`, calls `handle(req)`, writes `response-<uuid>.json` atomically (via `.tmp` + `os.rename`), deletes the request file.
 - `handle(req)` looks up `req.method` in a method table; calls it with `req.params`; returns either `{result = ...}` or `{error = "<message>"}`.

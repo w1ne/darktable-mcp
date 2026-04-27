@@ -13,8 +13,8 @@ __email__ = "14119286+w1ne@users.noreply.github.com"
 logger = logging.getLogger(__name__)
 
 
-def main() -> None:
-    """Main entry point for the darktable MCP server (stdio transport)."""
+def _run_server() -> None:
+    """Run the MCP server over stdio (default subcommand / no-args behavior)."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Darktable MCP Server (stdio)")
@@ -37,6 +37,18 @@ def main() -> None:
     except Exception as e:
         logger.error("Server error: %s", e)
         sys.exit(1)
+
+
+def main() -> None:
+    """Entry point: run MCP server (default) or dispatch to a subcommand."""
+    args = sys.argv[1:]
+    if args and args[0] == "install-plugin":
+        from .cli.install_plugin import install_main
+        sys.exit(install_main(args[1:]))
+    if args and args[0] == "uninstall-plugin":
+        from .cli.install_plugin import uninstall_main
+        sys.exit(uninstall_main(args[1:]))
+    _run_server()
 
 
 if __name__ == "__main__":

@@ -55,6 +55,9 @@ darktable-mcp = "darktable_mcp:main"
 [tool.setuptools.packages.find]
 include = ["darktable_mcp*"]
 
+[tool.setuptools.package-data]
+darktable_mcp = ["lua/*.lua"]
+
 [tool.black]
 line-length = 100
 target-version = ['py38']

@@ -53,7 +53,7 @@ headless after the user already has darktable open, no DB poking.
 ## Installation
 
 ```bash
-# Base install — library, import, export, GUI tools.
+# Base install — camera ingest, export, GUI launcher.
 pip install darktable-mcp
 
 # Optional: vision-rating workflow (extract_previews, apply_ratings_batch).
@@ -71,8 +71,6 @@ on your `PATH`. The `[vision]` extra pulls in `rawpy`, `Pillow`, and
 # "Extract previews from ~/Pictures/import-2026-04-26" (uses extract_previews)
 # "Open ~/Pictures/import-2026-04-26 in darktable, filtered to 5 stars" (uses open_in_darktable)
 ```
-
-**Note:** First run will auto-detect your darktable library location. Make sure you've opened darktable and imported some photos before using the MCP server.
 
 ## Configuration
 
@@ -120,21 +118,6 @@ No SQLite poking, no half-imported state, and no GUI launch until step 3.
 - Python 3.8+
 - darktable 4.0+ (with `darktable-cli` on `PATH`)
 - An MCP-compatible client (Claude Desktop, Claude Code, etc.)
-
-## Troubleshooting
-
-**"darktable setup error"** — Ensure darktable is installed and you've opened it at least once to create the library database.
-
-**"Failed to parse photo data"** — Your darktable library may be corrupted or in an unexpected format. Try opening darktable directly to verify it works.
-
-**"Library not found"** — The auto-detector couldn't find your darktable library. Common locations:
-- Linux: `~/.config/darktable/library.db`
-- macOS: `~/Library/Application Support/darktable/library.db`  
-- Windows: `%APPDATA%\Local\darktable\library.db`
-
-If your library is in a custom location, please open an issue.
-
-**Tool timeouts** — Some operations may take longer on large libraries. This is normal for the first run or after major library changes.
 
 ## Contributing
 

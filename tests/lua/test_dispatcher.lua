@@ -19,30 +19,33 @@ local function assertTrue(cond, label)
 end
 
 -- ---- Stub dt table ---------------------------------------------------------
-local stub_images = {
-  [1] = {id = 1, filename = "DSC_0001.NEF", path = "/photos", rating = 5},
-  [2] = {id = 2, filename = "DSC_0002.NEF", path = "/photos", rating = 3},
-  [3] = {id = 3, filename = "OTHER.NEF",   path = "/photos", rating = 4},
+-- Use ids that DO NOT overlap the iteration array's integer indexes (1..N),
+-- so dt.database[id] always resolves via __index without colliding with
+-- the iteration storage.
+local images_by_id = {
+  [101] = {id = 101, filename = "DSC_0001.NEF", path = "/photos", rating = 5},
+  [102] = {id = 102, filename = "DSC_0002.NEF", path = "/photos", rating = 3},
+  [103] = {id = 103, filename = "OTHER.NEF",   path = "/photos", rating = 4},
 }
--- dt.database supports: ipairs() iteration AND [id] subscript access.
-local stub_db = {}
-for _, img in pairs(stub_images) do table.insert(stub_db, img) end
-setmetatable(stub_db, {__index = stub_images})
+local iter_list = {}
+for _, img in pairs(images_by_id) do table.insert(iter_list, img) end
+local stub_db = setmetatable(iter_list, {
+  __index = function(_, k) return images_by_id[k] end,
+})
 
 local dt_log = {}
-_G.darktable = {
+local stub_dt = {
   database = stub_db,
   print_log = function(msg) table.insert(dt_log, msg) end,
   control = {
-    dispatch = function(_) end,    -- no-op for unit tests
-    sleep = function(_) end,       -- no-op for unit tests
+    dispatch = function(_) end,
+    sleep = function(_) end,
   },
 }
+-- Make `require("darktable")` return our stub by pre-populating package.loaded.
+package.loaded.darktable = stub_dt
 
--- ---- Load the plugin (requires it expose internals via a return) -----------
--- The plugin file at the end returns an internals table for testing:
---   return {handle = handle, scan_dir = scan_dir, methods = methods}
--- So we can require it without triggering the worker.
+-- ---- Load the plugin -------------------------------------------------------
 package.path = package.path .. ";./darktable_mcp/lua/?.lua"
 local internals = require("darktable_mcp")
 
@@ -50,9 +53,15 @@ local internals = require("darktable_mcp")
 do
   local result = internals.methods.view_photos({rating_min = 4, limit = 10})
   assertEq(#result, 2, "view_photos rating_min=4 returns 2 images")
-  assertEq(result[1].rating, 5, "view_photos result[1].rating")
-  assertTrue(result[1].id == "1" or result[1].id == "3",
-    "view_photos returns string-id 1 or 3")
+  -- Order-independent: collect ratings, both must be >= 4, and the SET
+  -- of ids must be {"101","103"} (the only images with rating >= 4).
+  local ids_seen = {}
+  for _, img in ipairs(result) do
+    assertTrue(img.rating >= 4, "view_photos rating_min=4 image rating >= 4")
+    ids_seen[img.id] = true
+  end
+  assertTrue(ids_seen["101"], "view_photos rating_min=4 includes id 101")
+  assertTrue(ids_seen["103"], "view_photos rating_min=4 includes id 103")
 end
 
 do
@@ -68,10 +77,10 @@ end
 
 -- ---- methods.rate_photos ---------------------------------------------------
 do
-  local result = internals.methods.rate_photos({photo_ids = {"1", "2"}, rating = 1})
+  local result = internals.methods.rate_photos({photo_ids = {"101", "102"}, rating = 1})
   assertEq(result.updated, 2, "rate_photos updated count")
-  assertEq(stub_images[1].rating, 1, "rate_photos changed image 1 rating")
-  assertEq(stub_images[2].rating, 1, "rate_photos changed image 2 rating")
+  assertEq(images_by_id[101].rating, 1, "rate_photos changed image 101 rating")
+  assertEq(images_by_id[102].rating, 1, "rate_photos changed image 102 rating")
 end
 
 -- ---- handle: known method --------------------------------------------------
@@ -96,9 +105,9 @@ do
   local test_dir = tmpdir .. "/darktable-mcp-lua-test-" .. tostring(os.time())
   os.execute("mkdir -p " .. test_dir)
 
-  -- Reset stub state.
-  stub_images[1].rating = 5
-  stub_images[2].rating = 3
+  -- Reset stub state so view_photos in scan_dir sees the original data.
+  images_by_id[101].rating = 5
+  images_by_id[102].rating = 3
 
   -- Write a request file.
   local req_path = test_dir .. "/request-test001.json"

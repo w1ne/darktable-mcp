@@ -8,9 +8,7 @@
 -- response-<uuid>.json. See:
 --   docs/superpowers/specs/2026-04-27-ipc-bridge-mvp-design.md
 
--- Prefer an injected `darktable` global (used by unit tests with a stub);
--- fall back to `require("darktable")` when running inside real darktable.
-local dt = rawget(_G, "darktable") or require("darktable")
+local dt = require("darktable")
 
 -- ---- JSON encode/decode (minimal, MVP-only) --------------------------------
 -- darktable Lua does not bundle a JSON library reliably. Inline a tiny
@@ -158,11 +156,12 @@ local methods = {}
 
 methods.view_photos = function(p)
   p = p or {}
-  local matched = {}
+  local out, count = {}, 0
   local limit = p.limit or 100
   local filter = p.filter or ""
   local rating_min = p.rating_min
   for _, image in ipairs(dt.database) do
+    if count >= limit then break end
     local include = true
     if rating_min and (image.rating or 0) < rating_min then include = false end
     if include and filter ~= "" then
@@ -170,19 +169,15 @@ methods.view_photos = function(p)
       if not ok then include = false end
     end
     if include then
-      table.insert(matched, {
+      table.insert(out, {
         id = tostring(image.id),
         filename = image.filename,
         path = image.path,
         rating = image.rating or 0,
       })
+      count = count + 1
     end
   end
-  -- Sort by rating descending so highest-rated photos come first; stable
-  -- enough for MVP (ties keep iteration order, which is fine).
-  table.sort(matched, function(a, b) return a.rating > b.rating end)
-  local out = {}
-  for i = 1, math.min(limit, #matched) do out[i] = matched[i] end
   return out
 end
 
@@ -190,20 +185,8 @@ methods.rate_photos = function(p)
   p = p or {}
   local updated = 0
   for _, photo_id in ipairs(p.photo_ids or {}) do
-    local target = tonumber(photo_id)
-    -- Prefer direct subscript lookup (the documented darktable API), but
-    -- fall back to a linear scan by id field when subscript returns the
-    -- wrong image (e.g. unit-test stubs that also use list indices).
-    local image = dt.database[target]
-    if not image or tonumber(image.id) ~= target then
-      for _, candidate in ipairs(dt.database) do
-        if tonumber(candidate.id) == target then
-          image = candidate
-          break
-        end
-      end
-    end
-    if image and tonumber(image.id) == target then
+    local image = dt.database[tonumber(photo_id)]
+    if image then
       image.rating = p.rating
       updated = updated + 1
     end

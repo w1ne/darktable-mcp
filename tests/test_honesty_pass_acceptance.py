@@ -3,6 +3,9 @@
 Each test pins one piece of the desired final state. They are red at the
 start of the iteration and turn green incrementally as deletion tasks
 land. See docs/superpowers/specs/2026-04-27-honesty-pass-design.md.
+
+These tests stay in the suite as a regression guard after the iteration
+completes — do not delete this file when the tests go green.
 """
 
 import importlib

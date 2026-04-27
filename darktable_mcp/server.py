@@ -9,6 +9,12 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from .bridge.client import (
+    Bridge,
+    BridgeError,
+    BridgePluginNotInstalledError,
+    BridgeTimeoutError,
+)
 from .darktable.cli_wrapper import CLIWrapper
 from .tools.camera_tools import CameraTools
 from .tools.preview_tools import (
@@ -33,6 +39,7 @@ class DarktableMCPServer:
         self.app: Server = Server("darktable-mcp")
         self._cli: Optional[CLIWrapper] = None
         self.camera_tools = CameraTools()
+        self.bridge = Bridge()
         self._handler_map: Dict[str, ToolHandler] = self._build_handlers()
         self._setup_tools()
 
@@ -64,6 +71,63 @@ class DarktableMCPServer:
 
     def _tool_definitions(self) -> List[Tool]:
         return [
+            Tool(
+                name="view_photos",
+                description=(
+                    "Browse photos in the user's darktable library. Filter by "
+                    "filename substring, minimum star rating, or both. Returns "
+                    "id, filename, path, and rating per match. Requires darktable "
+                    "to be running with the darktable-mcp Lua plugin installed "
+                    "(see darktable-mcp install-plugin)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "filter": {
+                            "type": "string",
+                            "description": "Substring filter on filename (case-insensitive)",
+                        },
+                        "rating_min": {
+                            "type": "integer",
+                            "minimum": -1,
+                            "maximum": 5,
+                            "description": "Minimum star rating to include",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 1000,
+                            "default": 100,
+                            "description": "Maximum number of photos to return",
+                        },
+                    },
+                },
+            ),
+            Tool(
+                name="rate_photos",
+                description=(
+                    "Apply a star rating to one or more photos in the user's "
+                    "darktable library. Requires darktable to be running with "
+                    "the darktable-mcp Lua plugin installed."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "photo_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of photo IDs (from view_photos)",
+                        },
+                        "rating": {
+                            "type": "integer",
+                            "minimum": -1,
+                            "maximum": 5,
+                            "description": "Star rating: -1=reject, 0=unrated, 1-5=stars",
+                        },
+                    },
+                    "required": ["photo_ids", "rating"],
+                },
+            ),
             Tool(
                 name="import_from_camera",
                 description=(
@@ -280,6 +344,8 @@ class DarktableMCPServer:
             "extract_previews": self._handle_extract_previews,
             "apply_ratings_batch": self._handle_apply_ratings_batch,
             "open_in_darktable": self._handle_open_in_darktable,
+            "view_photos": self._handle_view_photos,
+            "rate_photos": self._handle_rate_photos,
         }
 
     def list_tools(self) -> List[str]:
@@ -346,6 +412,52 @@ class DarktableMCPServer:
             darktable_path=arguments.get("darktable_path", "darktable"),
         )
         return [TextContent(type="text", text=format_open_summary(result))]
+
+    async def _handle_view_photos(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        try:
+            photos = self.bridge.call("view_photos", arguments)
+        except BridgePluginNotInstalledError:
+            return [TextContent(
+                type="text",
+                text="darktable-mcp plugin not installed. Run: darktable-mcp install-plugin",
+            )]
+        except BridgeTimeoutError:
+            return [TextContent(
+                type="text",
+                text="darktable not running, or plugin not loaded. Open darktable and try again.",
+            )]
+        except BridgeError as e:
+            return [TextContent(type="text", text=f"Plugin error: {e}")]
+
+        if not photos:
+            return [TextContent(type="text", text="No photos found matching criteria")]
+        lines = [f"Found {len(photos)} photos:"]
+        for p in photos:
+            stars = "⭐" * (p.get("rating") or 0)
+            lines.append(f"ID: {p['id']} | {p['filename']} | Rating: {stars}")
+        return [TextContent(type="text", text="\n".join(lines))]
+
+    async def _handle_rate_photos(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        try:
+            result = self.bridge.call("rate_photos", arguments)
+        except BridgePluginNotInstalledError:
+            return [TextContent(
+                type="text",
+                text="darktable-mcp plugin not installed. Run: darktable-mcp install-plugin",
+            )]
+        except BridgeTimeoutError:
+            return [TextContent(
+                type="text",
+                text="darktable not running, or plugin not loaded. Open darktable and try again.",
+            )]
+        except BridgeError as e:
+            return [TextContent(type="text", text=f"Plugin error: {e}")]
+
+        updated = result.get("updated", 0)
+        return [TextContent(
+            type="text",
+            text=f"Updated {updated} photos with {arguments.get('rating')} stars",
+        )]
 
     async def _handle_apply_ratings_batch(self, arguments: Dict[str, Any]) -> List[TextContent]:
         source_dir = arguments.get("source_dir")

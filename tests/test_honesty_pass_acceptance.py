@@ -14,12 +14,15 @@ import pytest
 
 from darktable_mcp.server import DarktableMCPServer
 
+# Updated 2026-04-27 (iteration 2): added view_photos + rate_photos restored via IPC bridge.
 EXPECTED_TOOLS = {
     "import_from_camera",
     "export_images",
     "extract_previews",
     "apply_ratings_batch",
     "open_in_darktable",
+    "view_photos",
+    "rate_photos",
 }
 
 

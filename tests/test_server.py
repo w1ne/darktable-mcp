@@ -24,6 +24,8 @@ class TestDarktableMCPServer:
             "extract_previews",
             "apply_ratings_batch",
             "open_in_darktable",
+            "view_photos",
+            "rate_photos",
         }
         assert set(server.list_tools()) == expected_tools
 
@@ -64,3 +66,66 @@ def test_server_registers_import_from_camera_tool():
     server = DarktableMCPServer()
     tool_names = [t.name for t in server._tool_definitions()]
     assert "import_from_camera" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_handle_view_photos_returns_formatted_list():
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.return_value = [
+        {"id": "1", "filename": "a.NEF", "path": "/p", "rating": 5},
+        {"id": "2", "filename": "b.NEF", "path": "/p", "rating": 4},
+    ]
+    result = await server._handle_view_photos({"filter": "", "limit": 10})
+    assert len(result) == 1
+    text = result[0].text
+    assert "a.NEF" in text
+    assert "b.NEF" in text
+    server.bridge.call.assert_called_once_with(
+        "view_photos", {"filter": "", "limit": 10}
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_view_photos_no_results_message():
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.return_value = []
+    result = await server._handle_view_photos({})
+    assert "No photos" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_handle_view_photos_friendly_message_when_plugin_missing():
+    from darktable_mcp.bridge.client import BridgePluginNotInstalledError
+
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.side_effect = BridgePluginNotInstalledError("missing")
+    result = await server._handle_view_photos({})
+    assert "install-plugin" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_handle_view_photos_friendly_message_when_dt_not_running():
+    from darktable_mcp.bridge.client import BridgeTimeoutError
+
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.side_effect = BridgeTimeoutError("timeout")
+    result = await server._handle_view_photos({})
+    assert "darktable" in result[0].text.lower()
+    assert "open" in result[0].text.lower() or "running" in result[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_rate_photos_returns_count():
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.return_value = {"updated": 3}
+    result = await server._handle_rate_photos({"photo_ids": ["1", "2", "3"], "rating": 4})
+    assert "3" in result[0].text
+    assert "4" in result[0].text
+    server.bridge.call.assert_called_once_with(
+        "rate_photos", {"photo_ids": ["1", "2", "3"], "rating": 4}
+    )

@@ -308,12 +308,13 @@ class DarktableMCPServer:
                     "applying a rating filter. Opening a folder via CLI "
                     "registers it as a film roll on first launch, and XMP "
                     "sidecars (from apply_ratings_batch) are picked up "
-                    "automatically. With `rating=N` (or rating_min == "
-                    "rating_max), the lighttable opens already filtered to "
-                    "exactly that rating via the official Lua API "
-                    "(darktable.gui.libs.collect.filter). Range filtering "
-                    "(rating_min != rating_max) is not yet pre-applied — "
-                    "the request is echoed back as a hint."
+                    "automatically. The lighttable opens already filtered "
+                    "via the official Lua API (darktable.gui.libs.filter "
+                    "rating + rating_comparator) for: exact `rating=N` (EQ), "
+                    "`rating_min=N` only (GEQ), `rating_max=N` only (LEQ), "
+                    "full [-1,5] (ALL), and [0,5] (NOT_REJECT). Arbitrary "
+                    "inner ranges (e.g. 2..4) can't be expressed as a single "
+                    "comparator pair and fall through unfiltered with a hint."
                 ),
                 inputSchema={
                     "type": "object",

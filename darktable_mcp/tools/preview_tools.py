@@ -426,29 +426,54 @@ def _format_rating_label(lo: int, hi: int) -> str:
     return f"{stars(lo)} to {stars(hi)}"
 
 
+# Map a rating int (-1..5) to the dt_collection_filter_t enum name.
+# darktable's filter dropdown is discrete: a star value plus a comparator.
+_RATING_TO_FILTER_ENUM = {
+    -1: "DT_COLLECTION_FILTER_REJECT",
+    0: "DT_COLLECTION_FILTER_STAR_NO",
+    1: "DT_COLLECTION_FILTER_STAR_1",
+    2: "DT_COLLECTION_FILTER_STAR_2",
+    3: "DT_COLLECTION_FILTER_STAR_3",
+    4: "DT_COLLECTION_FILTER_STAR_4",
+    5: "DT_COLLECTION_FILTER_STAR_5",
+}
+
+
 def _build_filter_luacmd(lo: int, hi: int) -> Optional[str]:
     """Generate a --luacmd snippet that pre-applies the rating filter.
 
-    Uses ``darktable.gui.libs.collect.filter({rule})`` — the official Lua
-    API for setting collection filter rules. The enum names are full
-    C identifiers (``DT_COLLECTION_PROP_RATING``, ``DT_LIB_COLLECT_MODE_AND``),
-    which is what luaA registers them under. Only exact-rating filtering
-    is supported here (``lo == hi``); range filtering uses a different
-    filter type (the new lib/filtering/rules/range rating panel) that
-    isn't reachable via the collect API in dt 5.4.
+    Uses the official ``darktable.gui.libs.filter`` API — the same widget
+    as the lighttable's top filter dropdown, with comparator support.
+    Maps a rating range ``[lo, hi]`` to a (filter_value, comparator) pair:
 
-    Returns None for ranges we can't express as a single discrete-rating
-    rule — caller should fall back to opening unfiltered.
+      * ``lo == hi``                → STAR_lo + EQ            (exact rating)
+      * ``lo == -1, hi == 5``       → ALL                     (no filter)
+      * ``lo == -1, hi >= 0``       → STAR_hi + LEQ           (rating ≤ hi)
+      * ``hi == 5,  lo >= -1``      → STAR_lo + GEQ           (rating ≥ lo)
+      * ``lo == 0, hi == 5``        → NOT_REJECT              (anything not rejected)
+
+    For arbitrary inner ranges (e.g. ratings 2..4) the dropdown can't
+    express it as a single comparator pair — returns None so the caller
+    falls back to opening unfiltered with a hint.
     """
-    if lo != hi:
-        return None
-    rating_value = lo
+    if lo == hi:
+        return _luacmd_rating(_RATING_TO_FILTER_ENUM[lo], "DT_COLLECTION_RATING_COMP_EQ")
+    if lo == -1 and hi == 5:
+        return _luacmd_rating("DT_COLLECTION_FILTER_ALL", "DT_COLLECTION_RATING_COMP_EQ")
+    if lo == 0 and hi == 5:
+        return _luacmd_rating("DT_COLLECTION_FILTER_NOT_REJECT", "DT_COLLECTION_RATING_COMP_EQ")
+    if lo == -1:
+        return _luacmd_rating(_RATING_TO_FILTER_ENUM[hi], "DT_COLLECTION_RATING_COMP_LEQ")
+    if hi == 5:
+        return _luacmd_rating(_RATING_TO_FILTER_ENUM[lo], "DT_COLLECTION_RATING_COMP_GEQ")
+    return None
+
+
+def _luacmd_rating(filter_enum: str, comparator_enum: str) -> str:
+    """Lua snippet that applies a rating dropdown filter + comparator."""
     return (
-        "local _r = darktable.gui.libs.collect.new_rule(); "
-        "_r.item = 'DT_COLLECTION_PROP_RATING'; "
-        "_r.mode = 'DT_LIB_COLLECT_MODE_AND'; "
-        f"_r.data = '{rating_value}'; "
-        "darktable.gui.libs.collect.filter({_r})"
+        f"darktable.gui.libs.filter.rating('{filter_enum}'); "
+        f"darktable.gui.libs.filter.rating_comparator('{comparator_enum}')"
     )
 
 
@@ -466,12 +491,12 @@ def build_darktable_command(
     "all film rolls" via ``--conf`` so a stale saved collection can't hide
     the folder being opened.
 
-    When ``rating`` is set (or rating_min == rating_max), the rating
-    filter is pre-applied via ``--luacmd`` using
-    ``darktable.gui.libs.collect.filter({rule})``. Range filtering
-    (rating_min != rating_max) is not currently pre-applied — the Lua
-    API exposes only the discrete-rating filter, not the new "range
-    rating" panel — so a range request opens unfiltered with a hint.
+    When ``rating`` is set, the lighttable opens already filtered to that
+    rating via ``darktable.gui.libs.filter.rating(...) +
+    rating_comparator(...)``. Open-bounded ranges (``rating_min`` only,
+    ``rating_max`` only, or full ``[-1, 5]``) are also pre-applied as
+    GEQ/LEQ/ALL. Arbitrary inner ranges (e.g. 2..4) can't be expressed
+    by a single comparator and fall through to unfiltered with a hint.
 
     Returns a list suitable for ``subprocess.Popen``.
     """
@@ -509,11 +534,19 @@ def open_in_darktable(
 
     Opening a folder via the CLI registers it as a film roll on first launch,
     and any XMP sidecars produced by ``apply_ratings_batch`` are picked up
-    automatically. When an exact rating is requested (``rating=N`` or
-    ``rating_min == rating_max``), the lighttable opens already filtered
-    to that rating via the official Lua API
-    (``darktable.gui.libs.collect.filter``). Range requests (``rating_min !=
-    rating_max``) currently fall through to unfiltered with a hint.
+    automatically. The lighttable opens already filtered when the request
+    can be expressed as one ``rating + comparator`` pair on
+    ``darktable.gui.libs.filter`` (the top dropdown widget):
+
+      * ``rating=N``         exact (EQ)
+      * ``rating_min=N``     N or higher (GEQ)
+      * ``rating_max=N``     N or lower (LEQ)
+      * full ``[-1, 5]``     no filter (ALL)
+      * ``[0, 5]``           anything not rejected (NOT_REJECT)
+
+    Arbitrary inner ranges (e.g. ratings 2..4) fall through unfiltered
+    with a hint — they need the new filtering panel which uses a
+    different rule API not yet wired up.
 
     Args:
         source_dir: Folder containing raw files (with XMP sidecars next to them).

@@ -191,35 +191,57 @@ class TestBuildDarktableCommand:
         assert cmd[-1] == str(tmp_path)
         assert "--luacmd" not in cmd  # no filter requested
 
+    def _luacmd(self, cmd: list[str]) -> str:
+        assert "--luacmd" in cmd, "expected --luacmd in command"
+        return cmd[cmd.index("--luacmd") + 1]
+
     def test_exact_rating_emits_luacmd(self, tmp_path: Path) -> None:
-        # Exact rating goes through dt.gui.libs.collect.filter via --luacmd.
         cmd = build_darktable_command(tmp_path, rating=5)
-        assert "--luacmd" in cmd
-        lua_idx = cmd.index("--luacmd")
-        lua_arg = cmd[lua_idx + 1]
-        assert "DT_COLLECTION_PROP_RATING" in lua_arg
-        assert "DT_LIB_COLLECT_MODE_AND" in lua_arg
-        assert "_r.data = '5'" in lua_arg
-        # Brittle --conf filter keys must NOT be set — we got there empirically
-        # and the lua API is what actually drives the GUI.
+        lua = self._luacmd(cmd)
+        assert "DT_COLLECTION_FILTER_STAR_5" in lua
+        assert "DT_COLLECTION_RATING_COMP_EQ" in lua
+        # Brittle --conf filter keys must NOT be set.
         joined = " ".join(cmd)
         assert "plugins/lighttable/filtering/" not in joined
         assert "plugins/collection/rating" not in joined
 
-    def test_rating_range_does_not_emit_luacmd(self, tmp_path: Path) -> None:
-        # Range filter not yet supported — fall through to unfiltered open.
-        cmd = build_darktable_command(tmp_path, rating_min=4, rating_max=5)
-        assert "--luacmd" not in cmd
-
     def test_reject_emits_luacmd(self, tmp_path: Path) -> None:
         cmd = build_darktable_command(tmp_path, rating=-1)
-        lua_arg = cmd[cmd.index("--luacmd") + 1]
-        assert "_r.data = '-1'" in lua_arg
+        lua = self._luacmd(cmd)
+        assert "DT_COLLECTION_FILTER_REJECT" in lua
+        assert "DT_COLLECTION_RATING_COMP_EQ" in lua
 
     def test_unstarred_emits_luacmd(self, tmp_path: Path) -> None:
         cmd = build_darktable_command(tmp_path, rating=0)
-        lua_arg = cmd[cmd.index("--luacmd") + 1]
-        assert "_r.data = '0'" in lua_arg
+        lua = self._luacmd(cmd)
+        assert "DT_COLLECTION_FILTER_STAR_NO" in lua
+
+    def test_rating_min_emits_geq(self, tmp_path: Path) -> None:
+        cmd = build_darktable_command(tmp_path, rating_min=4)
+        lua = self._luacmd(cmd)
+        assert "DT_COLLECTION_FILTER_STAR_4" in lua
+        assert "DT_COLLECTION_RATING_COMP_GEQ" in lua
+
+    def test_rating_max_emits_leq(self, tmp_path: Path) -> None:
+        cmd = build_darktable_command(tmp_path, rating_max=2)
+        lua = self._luacmd(cmd)
+        assert "DT_COLLECTION_FILTER_STAR_2" in lua
+        assert "DT_COLLECTION_RATING_COMP_LEQ" in lua
+
+    def test_rating_full_range_emits_all(self, tmp_path: Path) -> None:
+        cmd = build_darktable_command(tmp_path, rating_min=-1, rating_max=5)
+        lua = self._luacmd(cmd)
+        assert "DT_COLLECTION_FILTER_ALL" in lua
+
+    def test_rating_not_reject_emits_not_reject(self, tmp_path: Path) -> None:
+        cmd = build_darktable_command(tmp_path, rating_min=0, rating_max=5)
+        lua = self._luacmd(cmd)
+        assert "DT_COLLECTION_FILTER_NOT_REJECT" in lua
+
+    def test_inner_range_falls_through(self, tmp_path: Path) -> None:
+        # 2..4 can't be expressed with a single comparator; no luacmd emitted.
+        cmd = build_darktable_command(tmp_path, rating_min=2, rating_max=4)
+        assert "--luacmd" not in cmd
 
     def test_invalid_source_dir_raises(self, tmp_path: Path) -> None:
         with pytest.raises(DarktableMCPError):
@@ -282,10 +304,16 @@ class TestFormatOpenSummary:
         # Exact rating goes through Lua → "pre-applied" wording.
         assert "pre-applied" in text
 
-    def test_dry_run_range_hint_says_not_pre_applied(self, tmp_path: Path) -> None:
-        result = open_in_darktable(tmp_path, rating_min=4, rating_max=5, dry_run=True)
+    def test_dry_run_range_open_bound_pre_applied(self, tmp_path: Path) -> None:
+        # rating_min=4 → STAR_4 + GEQ, fully pre-applied.
+        result = open_in_darktable(tmp_path, rating_min=4, dry_run=True)
         text = format_open_summary(result)
-        assert "★★★★ to ★★★★★" in text
+        assert "pre-applied" in text
+
+    def test_dry_run_inner_range_falls_through_with_hint(self, tmp_path: Path) -> None:
+        # 2..4 can't be expressed → no luacmd, hint mode.
+        result = open_in_darktable(tmp_path, rating_min=2, rating_max=4, dry_run=True)
+        text = format_open_summary(result)
         assert "Range pre-apply not yet supported" in text
 
     def test_live_run_includes_pid(self) -> None:

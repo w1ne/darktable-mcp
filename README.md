@@ -17,7 +17,7 @@ Library operations (headless, via darktable Lua API):
 Vision-rating workflow (headless, file-based — no library required):
 - `extract_previews` — Pull auto-rotated JPEG previews out of raw files (NEF/CR2/ARW/DNG/etc), with a tiered thumb pass and an EXIF summary per file. Designed for token-efficient visual rating loops in MCP clients.
 - `apply_ratings_batch` — Write XMP sidecars (`xmp:Rating`) for a `{stem: rating}` batch, plus an append-only `ratings.jsonl` log so the history survives session resets.
-- `open_in_darktable` — Launch the darktable GUI on a folder. The folder registers as a film roll on first launch and the XMP sidecars are picked up automatically. With an exact rating (`rating=N` or rating_min == rating_max), the lighttable opens already filtered via `darktable.gui.libs.collect.filter` (the official Lua API). Range filtering is currently echoed as a hint without being pre-applied.
+- `open_in_darktable` — Launch the darktable GUI on a folder. The folder registers as a film roll on first launch and the XMP sidecars are picked up automatically. The lighttable opens already filtered via the official `darktable.gui.libs.filter` Lua API (rating + comparator) for exact ratings, open-bounded ranges (`rating_min` only or `rating_max` only), full range, and `[0, 5]` ("not rejected"). Arbitrary inner ranges (e.g. 2..4) fall through unfiltered with a hint.
 
 GUI / export:
 - `adjust_exposure` — Adjust exposure settings (opens darktable GUI for preview)
@@ -104,7 +104,7 @@ Library:
 Vision-rating workflow:
 - `extract_previews(source_dir, output_dir?, max_dim?, thumb_dim?, overwrite?)` — Extract embedded JPEG previews from raws, auto-rotate via EXIF orientation, and write a tiered preview (default 1024px) plus a small first-pass thumb (default 384px). Returns per-file paths and an EXIF summary (ISO, shutter, focal, aperture, datetime).
 - `apply_ratings_batch(source_dir, ratings, log?)` — Write XMP sidecars for a `{stem: rating}` batch (range -1..5, -1 = reject). Appends each rating to `<source_dir>/ratings.jsonl` for replay/audit.
-- `open_in_darktable(source_dir, rating?, rating_min?, rating_max?)` — Launch darktable on a folder. The folder is registered as a film roll on first launch and XMP sidecars are picked up automatically. With an exact `rating=N`, the lighttable opens already filtered to that rating via `darktable.gui.libs.collect.filter` (the official Lua API). Range filtering (`rating_min != rating_max`) is not yet pre-applied — the request comes back as a hint.
+- `open_in_darktable(source_dir, rating?, rating_min?, rating_max?)` — Launch darktable on a folder. The folder is registered as a film roll on first launch and XMP sidecars are picked up automatically. The lighttable opens already filtered via `darktable.gui.libs.filter.rating(...) + rating_comparator(...)` (the official Lua API) for exact ratings (EQ), `rating_min=N` (GEQ), `rating_max=N` (LEQ), full range (ALL), and `[0, 5]` (NOT_REJECT). Arbitrary inner ranges (e.g. 2..4) can't be expressed as a single comparator pair and fall through unfiltered with a hint.
 
 GUI / export:
 - `adjust_exposure(photo_ids, exposure_ev)` — Adjust exposure settings for photos. Opens darktable GUI to show preview.
@@ -120,7 +120,7 @@ When darktable's library doesn't yet know about your shoot — typically straigh
 
 1. `extract_previews` writes auto-rotated JPEGs (and small thumbs) next to a small EXIF summary so an MCP client can iterate efficiently.
 2. The client (e.g. Claude) reads previews, decides ratings, and calls `apply_ratings_batch` to write XMP sidecars alongside the raws.
-3. `open_in_darktable` launches the GUI with the folder imported as a film roll. With an exact rating (e.g. `rating=5`) the lighttable opens already filtered to those photos via the Lua API; range filtering currently returns a hint instead.
+3. `open_in_darktable` launches the GUI with the folder imported as a film roll. The lighttable opens already filtered via the Lua API for exact ratings, `rating_min` only, `rating_max` only, full range, and `[0, 5]`. Inner ranges (e.g. 2..4) need the new filtering panel and currently fall through with a hint.
 
 No SQLite poking, no half-imported state, and no GUI launch until step 3.
 

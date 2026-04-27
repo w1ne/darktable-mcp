@@ -205,8 +205,6 @@ import importlib.resources
 import subprocess
 import sys
 
-import pytest
-
 from darktable_mcp.server import DarktableMCPServer
 
 

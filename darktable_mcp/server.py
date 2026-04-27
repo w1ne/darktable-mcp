@@ -32,7 +32,7 @@ class DarktableMCPServer:
     def __init__(self) -> None:
         self.app: Server = Server("darktable-mcp")
         self._cli: Optional[CLIWrapper] = None
-        self._camera_tools: Optional[CameraTools] = None
+        self.camera_tools = CameraTools()
         self._handler_map: Dict[str, ToolHandler] = self._build_handlers()
         self._setup_tools()
 
@@ -42,13 +42,6 @@ class DarktableMCPServer:
         if self._cli is None:
             self._cli = CLIWrapper()
         return self._cli
-
-    @property
-    def camera_tools(self) -> CameraTools:
-        """Get camera tools instance (lazy-loaded)."""
-        if self._camera_tools is None:
-            self._camera_tools = CameraTools()
-        return self._camera_tools
 
     def _setup_tools(self) -> None:
         @self.app.list_tools()

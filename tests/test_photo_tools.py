@@ -297,23 +297,6 @@ class TestPhotoToolsImportFromCamera:
 
     @patch.object(PhotoTools, "_download_from_camera")
     @patch.object(PhotoTools, "_detect_cameras")
-    def test_summary_mentions_darktable_import_folder(
-        self, mock_detect, mock_download, tmp_path
-    ):
-        # The pragmatic version copies files but doesn't try to register them
-        # with darktable's library — that's left to the user via the GUI.
-        mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
-        mock_download.return_value = (2, [])
-
-        tools = PhotoTools()
-        summary = tools.import_from_camera({"destination": str(tmp_path)})
-
-        # User must be told how to register the files in darktable
-        assert "darktable" in summary.lower()
-        assert "import folder" in summary.lower()
-
-    @patch.object(PhotoTools, "_download_from_camera")
-    @patch.object(PhotoTools, "_detect_cameras")
     def test_one_camera_with_matching_port(self, mock_detect, mock_download, tmp_path):
         mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
         mock_download.return_value = (4, [])

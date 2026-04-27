@@ -22,7 +22,13 @@ local function encode_value(v)
   elseif t == "boolean" then return v and "true" or "false"
   elseif t == "number" then return tostring(v)
   elseif t == "string" then
-    return '"' .. v:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r'):gsub('\t', '\\t') .. '"'
+    local escaped = v:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r'):gsub('\t', '\\t')
+                     :gsub('\b', '\\b'):gsub('\f', '\\f')
+    -- Escape any remaining control bytes (0x00-0x1F) as \u00XX.
+    escaped = escaped:gsub('[%z\1-\31]', function(c)
+      return string.format('\\u%04x', string.byte(c))
+    end)
+    return '"' .. escaped .. '"'
   elseif t == "table" then
     -- Detect array vs object by checking for sequential integer keys.
     local n, max = 0, 0
@@ -67,13 +73,37 @@ local function decode_string(s, i)
     if c == '"' then return table.concat(out), i + 1
     elseif c == "\\" then
       local esc = s:sub(i+1, i+1)
-      if esc == "n" then table.insert(out, "\n")
-      elseif esc == "r" then table.insert(out, "\r")
-      elseif esc == "t" then table.insert(out, "\t")
-      elseif esc == '"' or esc == "\\" or esc == "/" then table.insert(out, esc)
+      if esc == "n" then table.insert(out, "\n"); i = i + 2
+      elseif esc == "r" then table.insert(out, "\r"); i = i + 2
+      elseif esc == "t" then table.insert(out, "\t"); i = i + 2
+      elseif esc == "b" then table.insert(out, "\b"); i = i + 2
+      elseif esc == "f" then table.insert(out, "\f"); i = i + 2
+      elseif esc == '"' or esc == "\\" or esc == "/" then table.insert(out, esc); i = i + 2
+      elseif esc == "u" then
+        -- \uXXXX: parse 4 hex digits, emit UTF-8 bytes.
+        local hex = s:sub(i+2, i+5)
+        if #hex ~= 4 or not hex:match("^%x%x%x%x$") then
+          error("malformed \\u escape at " .. i)
+        end
+        local cp = tonumber(hex, 16)
+        -- Encode codepoint as UTF-8.
+        if cp < 0x80 then
+          table.insert(out, string.char(cp))
+        elseif cp < 0x800 then
+          table.insert(out, string.char(
+            0xC0 + math.floor(cp / 0x40),
+            0x80 + (cp % 0x40)
+          ))
+        else
+          table.insert(out, string.char(
+            0xE0 + math.floor(cp / 0x1000),
+            0x80 + (math.floor(cp / 0x40) % 0x40),
+            0x80 + (cp % 0x40)
+          ))
+        end
+        i = i + 6
       else error("unsupported escape \\" .. esc)
       end
-      i = i + 2
     else
       table.insert(out, c)
       i = i + 1
@@ -251,7 +281,7 @@ local function scan_dir(dir)
     local content = read_file(req_path)
     if content then
       local ok, req = pcall(json.decode, content)
-      if ok and type(req) == "table" and req.id then
+      if ok and type(req) == "table" and type(req.id) == "string" and req.id:match("^[%w%-_]+$") then
         local resp = handle(req)
         local resp_path = dir .. "/response-" .. req.id .. ".json"
         write_file_atomic(resp_path, json.encode(resp))
@@ -285,8 +315,8 @@ local function worker_loop()
     if dt.control and dt.control.sleep then
       dt.control.sleep(100)
     else
-      -- Should never reach here in real darktable; tests pass a no-op stub.
-      break
+      dt.print_log("darktable-mcp: dt.control.sleep missing, worker exiting")
+      return
     end
   end
 end

@@ -59,7 +59,10 @@ class Bridge:
         req_id = str(uuid.uuid4())
         req_path = self._cache_dir / f"request-{req_id}.json"
         resp_path = self._cache_dir / f"response-{req_id}.json"
-        payload = json.dumps({"id": req_id, "method": method, "params": params})
+        payload = json.dumps(
+            {"id": req_id, "method": method, "params": params},
+            ensure_ascii=False,
+        )
 
         # Atomic write: tmp + rename.
         tmp = req_path.with_suffix(".json.tmp")

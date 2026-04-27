@@ -49,6 +49,13 @@ package.loaded.darktable = stub_dt
 package.path = package.path .. ";./darktable_mcp/lua/?.lua"
 local internals = require("darktable_mcp")
 
+-- ---- Verify the plugin announces itself on load ----------------------------
+do
+  assertEq(#dt_log, 1, "ready message logged on load")
+  assertTrue(string.find(dt_log[1] or "", "ready"),
+    "ready message contains the word 'ready'")
+end
+
 -- ---- methods.view_photos ---------------------------------------------------
 do
   local result = internals.methods.view_photos({rating_min = 4, limit = 10})
@@ -134,6 +141,34 @@ do
   end
 
   os.execute("rm -rf " .. test_dir)
+end
+
+-- ---- JSON round-trip with non-ASCII ----------------------------------------
+do
+  local original = {filter = "Тест", filename = "café.NEF"}
+  local encoded = internals.json.encode(original)
+  local decoded = internals.json.decode(encoded)
+  assertEq(decoded.filter, "Тест", "non-ASCII Cyrillic round-trips")
+  assertEq(decoded.filename, "café.NEF", "non-ASCII Latin-1 supplement round-trips")
+end
+
+-- ---- JSON \uXXXX escape decoding (matches what Python's json.dumps emits) -
+do
+  -- Python emits "Test" as ASCII, but emits "é" as é by default.
+  local payload = '{"name":"caf\\u00e9.NEF"}'
+  local decoded = internals.json.decode(payload)
+  assertEq(decoded.name, "café.NEF", "\\u00e9 escape decodes to UTF-8")
+end
+
+-- ---- JSON control-byte escaping in encoder --------------------------------
+do
+  local with_ctrl = "ab\1cd"
+  local encoded = internals.json.encode({s = with_ctrl})
+  -- Encoder must escape \1 as  (otherwise Python's strict parser rejects).
+  assertTrue(string.find(encoded, "\\u0001", 1, true) ~= nil,
+    "encoder escapes 0x01 as \\u0001")
+  local decoded = internals.json.decode(encoded)
+  assertEq(decoded.s, with_ctrl, "control byte round-trips through escape")
 end
 
 -- ---- Report ----------------------------------------------------------------

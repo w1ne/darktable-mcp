@@ -29,6 +29,17 @@ def _packaged_lua_bytes() -> bytes:
     )
 
 
+def _is_active_require_line(line: str) -> bool:
+    """True if `line` (a single luarc line) actively loads our plugin.
+
+    Matches the bare `require "darktable_mcp"` form, and the same with a
+    trailing inline `--` comment. Does NOT match commented-out forms like
+    `-- require "darktable_mcp"`.
+    """
+    no_comment = line.split("--", 1)[0].rstrip()
+    return no_comment == REQUIRE_LINE
+
+
 def install(home: Path) -> None:
     plugin_dir = _plugin_dir(home)
     plugin_dir.mkdir(parents=True, exist_ok=True)
@@ -40,7 +51,10 @@ def install(home: Path) -> None:
         text = luarc.read_text(encoding="utf-8")
     else:
         text = ""
-    if REQUIRE_LINE not in text:
+    already_active = any(
+        _is_active_require_line(ln) for ln in text.splitlines()
+    )
+    if not already_active:
         if text and not text.endswith("\n"):
             text += "\n"
         text += REQUIRE_LINE + "\n"
@@ -56,7 +70,7 @@ def uninstall(home: Path) -> None:
     luarc = _luarc_path(home)
     if luarc.exists():
         lines = luarc.read_text(encoding="utf-8").splitlines(keepends=True)
-        kept = [ln for ln in lines if ln.strip() != REQUIRE_LINE]
+        kept = [ln for ln in lines if not _is_active_require_line(ln)]
         luarc.write_text("".join(kept), encoding="utf-8")
 
 

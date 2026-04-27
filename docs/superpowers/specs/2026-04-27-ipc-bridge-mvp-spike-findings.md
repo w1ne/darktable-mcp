@@ -130,3 +130,57 @@ LUA ERROR : /home/andrii/.config/darktable/lua/lua_worker_probe.lua:40:
 This is exactly why the spike was needed. The corrected primitive
 (`dt.control.dispatch`) was found by introspecting `pairs(dt.control)`
 on the second run.
+
+## Task 6 Smoke Test
+
+**Date:** 2026-04-27
+**darktable version:** darktable 5.4.1
+**Library size:** ~871 NEFs across 3 film rolls (film_id=1 ~/Pictures/Darktable/20260425_no_name, film_id=2 ~/Pictures/import-2026-04-26 555 NEFs, film_id=3 ~/Pictures/import-2026-04-27 316 NEFs)
+
+### Verdict
+
+**PASS**
+
+### Observations
+
+- view_photos round-trip latency: ~0.56s wall (full Python interpreter startup + import + bridge call); the bridge round-trip itself is well under the worker's ~50ms poll interval. Repeated read-only invocation timing was 0.561s real / 0.461s user.
+- rate_photos round-trip latency: full read+rate run was 0.719s wall (so the rate call alone added ~0.16s on top of the read). Within the worker's poll cadence.
+- Rating change persisted to library.db: **yes**. After `rate_photos` set image id=1 to 5 stars, `flags & 0x7` in the `images` table read back as `5` (flags=0x445). Note: darktable encodes rating in the low 3 bits of `images.flags`, not a separate `rating` column — the spec script's `SELECT rating` would error; the verification used `flags & 0x7`.
+- Friendly error on darktable-not-running: **`FAIL: timeout. Is darktable open?`** — the `BridgeTimeoutError` branch fired as designed (the plugin file is still on disk, so this is a timeout, not the not-installed branch).
+- darktable log line `darktable-mcp bridge: ready` observed: **yes**, ~1.8s after launch (`1.7977 LUA darktable-mcp bridge: ready`).
+- `darktable-mcp install-plugin` output:
+
+  ```
+  ✓ wrote /home/andrii/.config/darktable/lua/darktable_mcp.lua
+  ✓ ensured 'require "darktable_mcp"' in /home/andrii/.config/darktable/luarc
+  Restart darktable to load the plugin.
+  ```
+
+- `dt.control.dispatch` behaved exactly as the spike predicted: the worker loop ran in the background while the GUI was responsive, and bridge calls completed in well under 1s.
+- The plugin runs inside the AppImage's bundled Lua (5.3+) without issue — same runtime the spike validated.
+
+### Issues encountered
+
+None for this smoke run. Two minor notes for future docs/tests:
+
+1. The original task script suggested `SELECT rating FROM images`, but darktable stores rating in `images.flags & 0x7`. Verification was adjusted accordingly.
+2. The friendly-error case under "darktable killed" surfaces as `BridgeTimeoutError` (timeout) rather than `BridgePluginNotInstalledError`, because the plugin file remains on disk after install — only the worker process is gone. The current message ("FAIL: timeout. Is darktable open?") already captures this distinction correctly.
+
+### Raw log excerpt
+
+Relevant lines from `/tmp/darktable-smoke.log` (full log was 38 lines;
+only the GIO module-load warnings are unrelated noise — same as observed
+during the spike):
+
+```
+  Lua                    -> ENABLED  - API version 9.6.0
+     0.0016 [dt starting]
+ /tmp/.mount_DarktabKbeIa/usr/bin/darktable -d lua
+     1.7977 LUA darktable-mcp bridge: ready
+
+** (darktable:156433): WARNING **: 17:15:04.710: atk-bridge: get_device_events_reply: unknown signature
+```
+
+Only one `darktable-mcp` line in the entire log; no Lua errors, no Lua
+warnings related to the plugin. The atk-bridge warning is unrelated GTK/
+AT-SPI noise on Wayland (already noted during the spike).

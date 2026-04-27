@@ -8,6 +8,10 @@ in the client; this server drives darktable.
 
 **Implemented tools:**
 
+Library operations (via Lua plugin — requires `darktable-mcp install-plugin` and an open darktable session):
+- `view_photos` — Browse photos in the darktable library with filename/rating filters.
+- `rate_photos` — Apply star ratings to photos in the library.
+
 Camera ingest (headless):
 - `import_from_camera` — Detect a connected camera (libgphoto2) and copy photos to a local directory
 
@@ -48,7 +52,7 @@ plugin that exposes a small RPC (e.g. unix socket); the MCP server talks
 to that plugin. That keeps every rule above intact — official API,
 headless after the user already has darktable open, no DB poking.
 
-> The iteration that builds the long-running plugin + IPC will be tracked in a separate spec under `docs/superpowers/specs/`.
+> Iteration 2 (spec: `docs/superpowers/specs/2026-04-27-ipc-bridge-mvp-design.md`) restored `view_photos` and `rate_photos` via a long-running Lua plugin. The remaining parked tools (`import_batch`, `adjust_exposure`, `apply_preset`) and the inner-range filter for `open_in_darktable` are deferred to a follow-up iteration — each is incremental once the bridge exists.
 
 ## Installation
 
@@ -59,6 +63,14 @@ pip install darktable-mcp
 # Optional: vision-rating workflow (extract_previews, apply_ratings_batch).
 pip install 'darktable-mcp[vision]'
 ```
+
+After installing, also install the darktable Lua plugin:
+
+```bash
+darktable-mcp install-plugin
+```
+
+This copies one Lua file into `~/.config/darktable/lua/` and adds a single `require` line to `~/.config/darktable/luarc`. Restart darktable for the plugin to load. The library tools (`view_photos`, `rate_photos`) require darktable to be open with the plugin loaded.
 
 You also need `darktable` (with `darktable-cli`) installed and available
 on your `PATH`. The `[vision]` extra pulls in `rawpy`, `Pillow`, and
@@ -91,6 +103,10 @@ Add to your Claude Desktop config:
 ```
 
 ## Implemented tools
+
+Library operations (via Lua plugin — see `darktable-mcp install-plugin`):
+- `view_photos(filter?, rating_min?, limit?)` — Returns photos matching the filename substring and minimum star rating, up to `limit` (default 100). Each entry: `id`, `filename`, `path`, `rating`. Requires darktable to be open with the plugin loaded.
+- `rate_photos(photo_ids, rating)` — Applies a star rating (-1=reject, 0=unrated, 1-5=stars) to the named photos. Returns updated count. Requires darktable to be open with the plugin loaded.
 
 Camera ingest:
 - `import_from_camera(destination?, camera_port?, timeout_seconds?)` — Detect a connected camera via libgphoto2 and copy all photos to a local directory. Returns the destination path.

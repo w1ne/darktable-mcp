@@ -258,17 +258,14 @@ class DarktableMCPServer:
             Tool(
                 name="open_in_darktable",
                 description=(
-                    "Launch the darktable GUI on a folder, optionally pre-"
-                    "applying a rating filter. Opening a folder via CLI "
-                    "registers it as a film roll on first launch, and XMP "
-                    "sidecars (from apply_ratings_batch) are picked up "
-                    "automatically. The lighttable opens already filtered "
-                    "via the official Lua API (darktable.gui.libs.filter "
-                    "rating + rating_comparator) for: exact `rating=N` (EQ), "
-                    "`rating_min=N` only (GEQ), `rating_max=N` only (LEQ), "
-                    "full [-1,5] (ALL), and [0,5] (NOT_REJECT). Arbitrary "
-                    "inner ranges (e.g. 2..4) can't be expressed as a single "
-                    "comparator pair and fall through unfiltered with a hint."
+                    "Launch the darktable GUI on a folder. The folder is "
+                    "registered as a film roll on first launch and XMP "
+                    "sidecars are picked up automatically. The lighttable "
+                    "opens already filtered via the official "
+                    "`darktable.gui.libs.collect.filter` Lua API for any "
+                    "rating spec: exact `rating=N`, `rating_min=N` (>=), "
+                    "`rating_max=N` (<=), arbitrary `rating_min..rating_max` "
+                    "inner ranges, or no filter at all."
                 ),
                 inputSchema={
                     "type": "object",

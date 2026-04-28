@@ -1,88 +1,50 @@
 # Darktable MCP Server
 
-A Model Context Protocol (MCP) server that exposes a small set of darktable
-operations to MCP clients (e.g. Claude Desktop, Claude Code). The AI lives
-in the client; this server drives darktable.
+A Model Context Protocol (MCP) server that exposes darktable operations
+to MCP clients (Claude Desktop, Claude Code, etc.). The AI lives in the
+client; this server drives darktable.
 
-## Status
+## Tools
 
-**Implemented tools:**
+**Library operations** (require `darktable-mcp install-plugin` and an open darktable session):
 
-Library operations (via Lua plugin — requires `darktable-mcp install-plugin` and an open darktable session):
-- `view_photos` — Browse photos in the darktable library with filename/rating filters.
-- `rate_photos` — Apply star ratings to photos in the library.
+- `view_photos(filter?, rating_min?, limit?)` — Browse the library by filename substring and minimum rating.
+- `rate_photos(photo_ids, rating)` — Apply -1..5 star ratings (-1 = reject, 0 = unrated).
+- `import_batch(source_path, recursive?)` — Register a folder as a film roll.
 
-Camera ingest (headless):
-- `import_from_camera` — Detect a connected camera (libgphoto2) and copy photos to a local directory
+**Camera ingest** (headless):
 
-Vision-rating workflow (headless, file-based — no library required):
-- `extract_previews` — Pull auto-rotated JPEG previews out of raw files (NEF/CR2/ARW/DNG/etc), with a tiered thumb pass and an EXIF summary per file. Designed for token-efficient visual rating loops in MCP clients.
-- `apply_ratings_batch` — Write XMP sidecars (`xmp:Rating`) for a `{stem: rating}` batch, plus an append-only `ratings.jsonl` log so the history survives session resets.
-- `open_in_darktable` — Launch the darktable GUI on a folder. The folder registers as a film roll on first launch and the XMP sidecars are picked up automatically. The lighttable opens already filtered via the official `darktable.gui.libs.filter` Lua API (rating + comparator) for exact ratings, open-bounded ranges (`rating_min` only or `rating_max` only), full range, and `[0, 5]` ("not rejected"). Arbitrary inner ranges (e.g. 2..4) fall through unfiltered with a hint.
+- `import_from_camera(destination?, camera_port?, timeout_seconds?)` — Detect a camera via libgphoto2 and copy photos to a local directory.
 
-Export:
-- `export_images` — Export photos to JPEG/PNG/TIFF via `darktable-cli`
+**Vision-rating workflow** (headless, file-based — no library required, needs `[vision]` extra):
 
-**Not yet implemented:**
+- `extract_previews(source_dir, output_dir?, max_dim?, thumb_dim?, overwrite?)` — Pull auto-rotated JPEG previews + small thumbs out of raws (NEF/CR2/ARW/DNG/...), with an EXIF summary per file.
+- `apply_ratings_batch(source_dir, ratings, log?)` — Write XMP `xmp:Rating` sidecars for a `{stem: rating}` batch + an append-only `ratings.jsonl` log.
+- `open_in_darktable(source_dir, rating?, rating_min?, rating_max?)` — Launch the GUI on a folder. Auto-registers as a film roll; pre-applies any rating filter (exact, ≥, ≤, or inner range) via `dt.gui.libs.collect.filter`.
 
-The full library-aware tool set (browsing, rating, importing into the library, exposure adjustment, preset application) is deferred to iteration 2 — see the spec under `docs/superpowers/specs/` once written.
+**Export:**
 
-The vision-rating tools require an optional `[vision]` install (rawpy / Pillow / pyexiv2) so the base install stays light.
+- `export_images(photo_ids, output_path, format, quality?)` — Export to JPEG/PNG/TIFF via `darktable-cli`.
 
-## Design rules (no compromise)
+## Design rules
 
-1. **Use the provided darktable APIs only.** `darktable-cli` for export;
-   the official Lua API for everything else. Do not read or write
-   `library.db` directly under any circumstances.
-2. **Tools that return data to the AI must be headless.** Spawning the
-   darktable GUI to answer a query is unacceptable.
-3. **GUI is only acceptable when the tool's purpose is to show the human
-   user something** in the darktable editor. No such tool exists yet.
-   When one is added, it is the only thing that may launch the GUI.
+Use only the official darktable APIs: `darktable-cli` for export, the Lua API for everything else. No direct `library.db` reads or writes. Tools that return data to the AI must be headless; the GUI may launch only when the tool's purpose is to show the human something.
 
-### Why some tools are parked
+## Why some tools are parked
 
-`darktable-cli` deliberately does not load the user's library, so it
-cannot browse it. `darktable --lua` brings up the full GUI. That means
-there is no headless, official-API path today for library reads or
-writes. The honest answer is to not ship those tools yet.
-
-The planned unblocker is a long-running darktable instance running a Lua
-plugin that exposes a small RPC (e.g. unix socket); the MCP server talks
-to that plugin. That keeps every rule above intact — official API,
-headless after the user already has darktable open, no DB poking.
-
-> Iteration 2 (spec: `docs/superpowers/specs/2026-04-27-ipc-bridge-mvp-design.md`) restored `view_photos` and `rate_photos` via a long-running Lua plugin. The remaining parked tools (`import_batch`, `adjust_exposure`, `apply_preset`) and the inner-range filter for `open_in_darktable` are deferred to a follow-up iteration — each is incremental once the bridge exists.
+`darktable-cli` doesn't load the user's library and `darktable --lua` brings up the full GUI, so there's no headless one-shot path for library reads/writes. Iteration 2 (spec: `docs/superpowers/specs/2026-04-27-ipc-bridge-mvp-design.md`) shipped a long-running Lua plugin loaded into the user's interactive darktable session, with a file-based JSON RPC bridge. `view_photos`, `rate_photos`, and `import_batch` ride on it. Still parked: `apply_preset` and `adjust_exposure` — pending a Lua-API spike for `dt.styles` and image-history-stack manipulation.
 
 ## Installation
 
 ```bash
-# Base install — camera ingest, export, GUI launcher.
 pip install darktable-mcp
-
-# Optional: vision-rating workflow (extract_previews, apply_ratings_batch).
+# Optional: vision-rating workflow extras
 pip install 'darktable-mcp[vision]'
-```
-
-After installing, also install the darktable Lua plugin:
-
-```bash
+# Install the Lua plugin into ~/.config/darktable/, then restart darktable
 darktable-mcp install-plugin
 ```
 
-This copies one Lua file into `~/.config/darktable/lua/` and adds a single `require` line to `~/.config/darktable/luarc`. Restart darktable for the plugin to load. The library tools (`view_photos`, `rate_photos`) require darktable to be open with the plugin loaded.
-
-You also need `darktable` (with `darktable-cli`) installed and available
-on your `PATH`. The `[vision]` extra pulls in `rawpy`, `Pillow`, and
-`pyexiv2`, which in turn need `libraw` and `libexiv2` system packages.
-
-**Quick test:** After installation, try:
-```bash
-# In Claude Desktop, you can now ask:
-# "Pull a folder of raws off my camera" (uses import_from_camera)
-# "Extract previews from ~/Pictures/import-2026-04-26" (uses extract_previews)
-# "Open ~/Pictures/import-2026-04-26 in darktable, filtered to 5 stars" (uses open_in_darktable)
-```
+You also need `darktable` (with `darktable-cli`) on `PATH`. The `[vision]` extra pulls in `rawpy`, `Pillow`, and `pyexiv2`, which need system `libraw` and `libexiv2`.
 
 ## Configuration
 
@@ -102,32 +64,15 @@ Add to your Claude Desktop config:
 }
 ```
 
-## Implemented tools
-
-Library operations (via Lua plugin — see `darktable-mcp install-plugin`):
-- `view_photos(filter?, rating_min?, limit?)` — Returns photos matching the filename substring and minimum star rating, up to `limit` (default 100). Each entry: `id`, `filename`, `path`, `rating`. Requires darktable to be open with the plugin loaded.
-- `rate_photos(photo_ids, rating)` — Applies a star rating (-1=reject, 0=unrated, 1-5=stars) to the named photos. Returns updated count. Requires darktable to be open with the plugin loaded.
-
-Camera ingest:
-- `import_from_camera(destination?, camera_port?, timeout_seconds?)` — Detect a connected camera via libgphoto2 and copy all photos to a local directory. Returns the destination path.
-
-Vision-rating workflow:
-- `extract_previews(source_dir, output_dir?, max_dim?, thumb_dim?, overwrite?)` — Extract embedded JPEG previews from raws, auto-rotate via EXIF orientation, and write a tiered preview (default 1024px) plus a small first-pass thumb (default 384px). Returns per-file paths and an EXIF summary (ISO, shutter, focal, aperture, datetime).
-- `apply_ratings_batch(source_dir, ratings, log?)` — Write XMP sidecars for a `{stem: rating}` batch (range -1..5, -1 = reject). Appends each rating to `<source_dir>/ratings.jsonl` for replay/audit.
-- `open_in_darktable(source_dir, rating?, rating_min?, rating_max?)` — Launch darktable on a folder. The folder is registered as a film roll on first launch and XMP sidecars are picked up automatically. The lighttable opens already filtered via `darktable.gui.libs.filter.rating(...) + rating_comparator(...)` (the official Lua API) for exact ratings (EQ), `rating_min=N` (GEQ), `rating_max=N` (LEQ), full range (ALL), and `[0, 5]` (NOT_REJECT). Arbitrary inner ranges (e.g. 2..4) can't be expressed as a single comparator pair and fall through unfiltered with a hint.
-
-Export:
-- `export_images(photo_ids, output_path, format, quality?)` — Export photos to JPEG/PNG/TIFF via `darktable-cli`.
-
 ## Vision-rating workflow
 
-When darktable's library doesn't yet know about your shoot — typically straight off a card or a freshly-copied folder — you can rate by vision before any import:
+When darktable's library doesn't yet know about your shoot — typically straight off a card — you can rate by vision before any import:
 
-1. `extract_previews` writes auto-rotated JPEGs (and small thumbs) next to a small EXIF summary so an MCP client can iterate efficiently.
-2. The client (e.g. Claude) reads previews, decides ratings, and calls `apply_ratings_batch` to write XMP sidecars alongside the raws.
-3. `open_in_darktable` launches the GUI with the folder imported as a film roll. The lighttable opens already filtered via the Lua API for exact ratings, `rating_min` only, `rating_max` only, full range, and `[0, 5]`. Inner ranges (e.g. 2..4) need the new filtering panel and currently fall through with a hint.
+1. `extract_previews` writes auto-rotated JPEGs and an EXIF summary so the client can iterate efficiently.
+2. The client reads previews, decides ratings, and calls `apply_ratings_batch` to write XMP sidecars next to the raws.
+3. `open_in_darktable` launches the GUI with the folder as a film roll, lighttable filtered to the rating range you want.
 
-No SQLite poking, no half-imported state, and no GUI launch until step 3.
+No SQLite poking, no half-imported state, no GUI launch until step 3.
 
 ## Requirements
 
@@ -137,15 +82,8 @@ No SQLite poking, no half-imported state, and no GUI launch until step 3.
 
 ## Contributing
 
-Contributions welcome. The most useful starting point is the long-running
-Lua-plugin + IPC integration that unblocks every parked tool. Any change
-that reads or writes `library.db` directly will be rejected.
+Contributions welcome. The remaining parked tools (`apply_preset`, `adjust_exposure`) are the natural next step. Any change that reads or writes `library.db` directly will be rejected.
 
 ## License
 
 MIT — see `LICENSE`.
-
-## Keywords
-
-darktable, MCP, model context protocol, photo editing, RAW processing,
-batch processing, photography workflow, Claude

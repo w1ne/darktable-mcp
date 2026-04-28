@@ -11,6 +11,8 @@ client; this server drives darktable.
 - `view_photos(filter?, rating_min?, limit?)` — Browse the library by filename substring and minimum rating.
 - `rate_photos(photo_ids, rating)` — Apply -1..5 star ratings (-1 = reject, 0 = unrated).
 - `import_batch(source_path, recursive?)` — Register a folder as a film roll.
+- `list_styles()` — Enumerate installed darktable styles (presets), returning name + description per entry.
+- `apply_preset(photo_ids, preset_name)` — Apply a named darktable style to one or more photos. Use `list_styles` first to discover exact names.
 
 **Camera ingest** (headless):
 
@@ -32,7 +34,9 @@ Use only the official darktable APIs: `darktable-cli` for export, the Lua API fo
 
 ## Why some tools are parked
 
-`darktable-cli` doesn't load the user's library and `darktable --lua` brings up the full GUI, so there's no headless one-shot path for library reads/writes. Iteration 2 (spec: `docs/superpowers/specs/2026-04-27-ipc-bridge-mvp-design.md`) shipped a long-running Lua plugin loaded into the user's interactive darktable session, with a file-based JSON RPC bridge. `view_photos`, `rate_photos`, and `import_batch` ride on it. Still parked: `apply_preset` and `adjust_exposure` — pending a Lua-API spike for `dt.styles` and image-history-stack manipulation.
+`darktable-cli` doesn't load the user's library and `darktable --lua` brings up the full GUI, so there's no headless one-shot path for library reads/writes. Iteration 2 (spec: `docs/superpowers/specs/2026-04-27-ipc-bridge-mvp-design.md`) shipped a long-running Lua plugin loaded into the user's interactive darktable session, with a file-based JSON RPC bridge. The library tools (`view_photos`, `rate_photos`, `import_batch`, `list_styles`, `apply_preset`) all ride on it.
+
+`adjust_exposure` was retired during iteration 3 — see `docs/superpowers/specs/2026-04-28-iter3-design.md`. The darktable Lua API in 9.6.0 exposes neither `image.modules` nor `image.history`, and `dt.gui.action` requires an active darkroom view (single-image, GUI-driven). The realistic future paths (pre-created `.dtstyle` exposure presets + `apply_preset`, or `darktable-cli --style` for export-only) are workable but not "set +N EV from Lua" tools.
 
 ## Installation
 
@@ -82,7 +86,7 @@ No SQLite poking, no half-imported state, no GUI launch until step 3.
 
 ## Contributing
 
-Contributions welcome. The remaining parked tools (`apply_preset`, `adjust_exposure`) are the natural next step. Any change that reads or writes `library.db` directly will be rejected.
+Contributions welcome. Any change that reads or writes `library.db` directly will be rejected.
 
 ## License
 

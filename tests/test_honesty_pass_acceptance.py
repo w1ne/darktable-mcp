@@ -23,6 +23,7 @@ EXPECTED_TOOLS = {
     "open_in_darktable",
     "view_photos",
     "rate_photos",
+    "import_batch",
 }
 
 

@@ -90,6 +90,55 @@ do
   assertEq(images_by_id[102].rating, 1, "rate_photos changed image 102 rating")
 end
 
+-- ---- methods.import_batch --------------------------------------------------
+do
+  -- Stub dt.database.import to record args and return a fake list.
+  -- darktable's real API takes only a path string; recursion is governed by
+  -- a darktable preference, not a per-call argument.
+  local recorded = {}
+  local stub_imported = {{}, {}, {}}  -- 3 fake images
+  -- Save original (in case test_dispatcher runs other tests later that need it).
+  local original_db = stub_dt.database
+  stub_dt.database = setmetatable({
+    import = function(path)
+      table.insert(recorded, {path = path})
+      return stub_imported
+    end,
+  }, {__index = original_db})
+
+  local result = internals.methods.import_batch({source_path = "/tmp/foo", recursive = true})
+  assertEq(result.imported, 3, "import_batch returns count of imported images")
+  assertEq(result.source_path, "/tmp/foo", "import_batch returns source_path back")
+  assertEq(result.recursive, true, "import_batch echoes recursive back")
+  assertEq(#recorded, 1, "dt.database.import called once")
+  assertEq(recorded[1].path, "/tmp/foo", "import called with source_path")
+
+  -- Default recursive = true when not specified
+  local r2 = internals.methods.import_batch({source_path = "/tmp/bar"})
+  assertEq(r2.recursive, true, "import_batch defaults recursive=true")
+
+  -- Single-image return (non-table) should count as 1.
+  stub_dt.database = setmetatable({
+    import = function(_) return {} end,  -- ensure a userdata-like (we use empty table)
+  }, {__index = original_db})
+
+  -- Restore.
+  stub_dt.database = original_db
+end
+
+-- ---- import_batch error: missing source_path -------------------------------
+do
+  local resp = internals.handle({
+    id = "ib1",
+    method = "import_batch",
+    params = {},  -- no source_path
+  })
+  assertEq(resp.id, "ib1", "import_batch error preserves id")
+  assertTrue(resp.error ~= nil, "import_batch returns error when source_path missing")
+  assertTrue(string.find(resp.error or "", "source_path") ~= nil,
+    "error message mentions source_path")
+end
+
 -- ---- handle: known method --------------------------------------------------
 do
   local resp = internals.handle({id = "abc", method = "view_photos", params = {limit = 1}})

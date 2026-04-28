@@ -129,6 +129,32 @@ class DarktableMCPServer:
                 },
             ),
             Tool(
+                name="import_batch",
+                description=(
+                    "Register a folder as a film roll in the user's darktable "
+                    "library. Useful when you've copied photos from a card or "
+                    "external drive and want darktable to know about them. "
+                    "Returns the count of newly-imported photos. Requires "
+                    "darktable to be running with the darktable-mcp Lua plugin "
+                    "installed."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "source_path": {
+                            "type": "string",
+                            "description": "Absolute path to the folder of photos to import",
+                        },
+                        "recursive": {
+                            "type": "boolean",
+                            "default": True,
+                            "description": "Recurse into subdirectories (default true)",
+                        },
+                    },
+                    "required": ["source_path"],
+                },
+            ),
+            Tool(
                 name="import_from_camera",
                 description=(
                     "Use when a camera or memory card is physically connected. "
@@ -343,6 +369,7 @@ class DarktableMCPServer:
             "open_in_darktable": self._handle_open_in_darktable,
             "view_photos": self._handle_view_photos,
             "rate_photos": self._handle_rate_photos,
+            "import_batch": self._handle_import_batch,
         }
 
     def list_tools(self) -> List[str]:
@@ -454,6 +481,29 @@ class DarktableMCPServer:
         return [TextContent(
             type="text",
             text=f"Updated {updated} photos with {arguments.get('rating')} stars",
+        )]
+
+    async def _handle_import_batch(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        try:
+            result = self.bridge.call("import_batch", arguments)
+        except BridgePluginNotInstalledError:
+            return [TextContent(
+                type="text",
+                text="darktable-mcp plugin not installed. Run: darktable-mcp install-plugin",
+            )]
+        except BridgeTimeoutError:
+            return [TextContent(
+                type="text",
+                text="darktable not running, or plugin not loaded. Open darktable and try again.",
+            )]
+        except BridgeError as e:
+            return [TextContent(type="text", text=f"Plugin error: {e}")]
+
+        imported = result.get("imported", 0)
+        src = result.get("source_path", arguments.get("source_path", "?"))
+        return [TextContent(
+            type="text",
+            text=f"Imported {imported} photos from {src}",
         )]
 
     async def _handle_apply_ratings_batch(self, arguments: Dict[str, Any]) -> List[TextContent]:

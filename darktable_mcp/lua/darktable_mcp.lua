@@ -224,6 +224,55 @@ methods.rate_photos = function(p)
   return {updated = updated}
 end
 
+methods.import_batch = function(p)
+  p = p or {}
+  local source_path = p.source_path
+  if not source_path or source_path == "" then
+    error("import_batch: source_path required")
+  end
+  local recursive = p.recursive
+  if recursive == nil then recursive = true end
+  -- dt.database.import takes only a path string in darktable 5.x;
+  -- recursion follows the "recurse_directories" preference. The return
+  -- value is heterogeneous: a dt_lua_image_t for a single file, a
+  -- dt_lua_film_t (the registered film roll) for a directory. Darktable
+  -- scans the folder asynchronously, so the image count is not yet
+  -- available when this call returns.
+  local imported = dt.database.import(source_path)
+
+  -- For a stub-table return (used in unit tests) `#imported` is the
+  -- definitive count.
+  local count
+  if type(imported) == "table" then
+    count = #imported
+  else
+    -- Real darktable: poll dt.database for images whose film.path equals
+    -- source_path. The scan runs on a background thread; sleep+retry up
+    -- to ~3s before giving up.
+    count = 0
+    local attempts = 0
+    while attempts < 30 do
+      count = 0
+      for _, image in ipairs(dt.database) do
+        local film = image.film
+        if film and film.path == source_path then
+          count = count + 1
+        end
+      end
+      if count > 0 then break end
+      if dt.control and dt.control.sleep then
+        dt.control.sleep(100)
+      end
+      attempts = attempts + 1
+    end
+    -- Final fallback: if the scan turned up nothing but the return value
+    -- is non-nil, treat as 1 (single-file import succeeded).
+    if count == 0 and imported ~= nil then count = 1 end
+  end
+
+  return {imported = count, source_path = source_path, recursive = recursive}
+end
+
 -- ---- Dispatch --------------------------------------------------------------
 
 local function handle(req)

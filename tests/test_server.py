@@ -26,6 +26,7 @@ class TestDarktableMCPServer:
             "open_in_darktable",
             "view_photos",
             "rate_photos",
+            "import_batch",
         }
         assert set(server.list_tools()) == expected_tools
 
@@ -129,3 +130,38 @@ async def test_handle_rate_photos_returns_count():
     server.bridge.call.assert_called_once_with(
         "rate_photos", {"photo_ids": ["1", "2", "3"], "rating": 4}
     )
+
+
+@pytest.mark.asyncio
+async def test_handle_import_batch_returns_count():
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.return_value = {"imported": 12, "source_path": "/path/foo"}
+    result = await server._handle_import_batch({"source_path": "/path/foo"})
+    assert "Imported 12" in result[0].text
+    assert "/path/foo" in result[0].text
+    server.bridge.call.assert_called_once_with(
+        "import_batch", {"source_path": "/path/foo"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_import_batch_friendly_error_when_plugin_missing():
+    from darktable_mcp.bridge.client import BridgePluginNotInstalledError
+
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.side_effect = BridgePluginNotInstalledError("missing")
+    result = await server._handle_import_batch({"source_path": "/x"})
+    assert "install-plugin" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_handle_import_batch_friendly_error_when_dt_not_running():
+    from darktable_mcp.bridge.client import BridgeTimeoutError
+
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.side_effect = BridgeTimeoutError("timeout")
+    result = await server._handle_import_batch({"source_path": "/x"})
+    assert "darktable" in result[0].text.lower()

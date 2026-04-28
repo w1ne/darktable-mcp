@@ -26,6 +26,11 @@ def test_rate_photos_registered():
     assert "rate_photos" in server.list_tools()
 
 
+def test_import_batch_registered():
+    server = DarktableMCPServer()
+    assert "import_batch" in server.list_tools()
+
+
 def test_bridge_module_exports_required_symbols():
     mod = importlib.import_module("darktable_mcp.bridge.client")
     for name in (

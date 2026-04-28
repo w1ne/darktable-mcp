@@ -24,6 +24,8 @@ EXPECTED_TOOLS = {
     "view_photos",
     "rate_photos",
     "import_batch",
+    "list_styles",
+    "apply_preset",
 }
 
 

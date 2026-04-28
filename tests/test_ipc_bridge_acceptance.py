@@ -31,6 +31,16 @@ def test_import_batch_registered():
     assert "import_batch" in server.list_tools()
 
 
+def test_list_styles_registered():
+    server = DarktableMCPServer()
+    assert "list_styles" in server.list_tools()
+
+
+def test_apply_preset_registered():
+    server = DarktableMCPServer()
+    assert "apply_preset" in server.list_tools()
+
+
 def test_bridge_module_exports_required_symbols():
     mod = importlib.import_module("darktable_mcp.bridge.client")
     for name in (

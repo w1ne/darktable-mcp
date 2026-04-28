@@ -27,6 +27,8 @@ class TestDarktableMCPServer:
             "view_photos",
             "rate_photos",
             "import_batch",
+            "list_styles",
+            "apply_preset",
         }
         assert set(server.list_tools()) == expected_tools
 
@@ -164,4 +166,83 @@ async def test_handle_import_batch_friendly_error_when_dt_not_running():
     server.bridge = Mock()
     server.bridge.call.side_effect = BridgeTimeoutError("timeout")
     result = await server._handle_import_batch({"source_path": "/x"})
+    assert "darktable" in result[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_list_styles_returns_count():
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.return_value = {
+        "styles": [{"name": "alpha", "description": "a"}, {"name": "beta", "description": "b"}],
+        "count": 2,
+    }
+    result = await server._handle_list_styles({})
+    text = result[0].text
+    assert "2 styles installed" in text
+    assert "alpha" in text
+    assert "beta" in text
+
+
+@pytest.mark.asyncio
+async def test_handle_list_styles_empty():
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.return_value = {"styles": [], "count": 0}
+    result = await server._handle_list_styles({})
+    assert "No styles" in result[0].text
+
+
+@pytest.mark.asyncio
+async def test_handle_list_styles_truncates_at_50():
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.return_value = {
+        "styles": [{"name": f"s{i}", "description": ""} for i in range(75)],
+        "count": 75,
+    }
+    result = await server._handle_list_styles({})
+    text = result[0].text
+    assert "75 styles installed" in text
+    assert "and 25 more" in text
+
+
+@pytest.mark.asyncio
+async def test_handle_apply_preset_returns_applied_count():
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.return_value = {"applied": 3, "missed": [], "preset_name": "myStyle"}
+    result = await server._handle_apply_preset({
+        "photo_ids": ["1", "2", "3"], "preset_name": "myStyle",
+    })
+    text = result[0].text
+    assert "myStyle" in text
+    assert "3 photo" in text
+
+
+@pytest.mark.asyncio
+async def test_handle_apply_preset_reports_missed():
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.return_value = {
+        "applied": 1, "missed": ["999"], "preset_name": "myStyle",
+    }
+    result = await server._handle_apply_preset({
+        "photo_ids": ["1", "999"], "preset_name": "myStyle",
+    })
+    text = result[0].text
+    assert "999" in text
+    assert "Missed" in text
+
+
+@pytest.mark.asyncio
+async def test_handle_apply_preset_friendly_error_when_dt_not_running():
+    from darktable_mcp.bridge.client import BridgeTimeoutError
+
+    server = DarktableMCPServer()
+    server.bridge = Mock()
+    server.bridge.call.side_effect = BridgeTimeoutError("timeout")
+    result = await server._handle_apply_preset({
+        "photo_ids": ["1"], "preset_name": "x",
+    })
     assert "darktable" in result[0].text.lower()

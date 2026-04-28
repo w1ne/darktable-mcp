@@ -155,6 +155,45 @@ class DarktableMCPServer:
                 },
             ),
             Tool(
+                name="list_styles",
+                description=(
+                    "List all darktable styles (presets) installed on the user's "
+                    "system. Returns name and description for each. Required "
+                    "discovery step before calling apply_preset, since style names "
+                    "must match exactly. Requires darktable to be running with the "
+                    "darktable-mcp Lua plugin installed."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+            Tool(
+                name="apply_preset",
+                description=(
+                    "Apply a darktable style (preset) to one or more photos. The "
+                    "preset_name must exactly match a style name from list_styles. "
+                    "Returns counts of applied and missed photos. Requires "
+                    "darktable to be running with the darktable-mcp Lua plugin "
+                    "installed."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "photo_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Photo IDs (from view_photos)",
+                        },
+                        "preset_name": {
+                            "type": "string",
+                            "description": "Style name (must match exactly; see list_styles)",
+                        },
+                    },
+                    "required": ["photo_ids", "preset_name"],
+                },
+            ),
+            Tool(
                 name="import_from_camera",
                 description=(
                     "Use when a camera or memory card is physically connected. "
@@ -370,6 +409,8 @@ class DarktableMCPServer:
             "view_photos": self._handle_view_photos,
             "rate_photos": self._handle_rate_photos,
             "import_batch": self._handle_import_batch,
+            "list_styles": self._handle_list_styles,
+            "apply_preset": self._handle_apply_preset,
         }
 
     def list_tools(self) -> List[str]:
@@ -505,6 +546,62 @@ class DarktableMCPServer:
             type="text",
             text=f"Imported {imported} photos from {src}",
         )]
+
+    async def _handle_list_styles(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        try:
+            result = self.bridge.call("list_styles", arguments)
+        except BridgePluginNotInstalledError:
+            return [TextContent(
+                type="text",
+                text="darktable-mcp plugin not installed. Run: darktable-mcp install-plugin",
+            )]
+        except BridgeTimeoutError:
+            return [TextContent(
+                type="text",
+                text="darktable not running, or plugin not loaded. Open darktable and try again.",
+            )]
+        except BridgeError as e:
+            return [TextContent(type="text", text=f"Plugin error: {e}")]
+
+        styles = result.get("styles", [])
+        count = result.get("count", len(styles))
+        if count == 0:
+            return [TextContent(type="text", text="No styles installed.")]
+        # Show count + first 50 names, with a hint if there are more.
+        lines = [f"{count} styles installed:"]
+        for s in styles[:50]:
+            desc = s.get("description") or ""
+            if desc:
+                lines.append(f"  {s['name']} — {desc}")
+            else:
+                lines.append(f"  {s['name']}")
+        if count > 50:
+            lines.append(f"  ... and {count - 50} more (full list available; this is the first 50)")
+        return [TextContent(type="text", text="\n".join(lines))]
+
+    async def _handle_apply_preset(self, arguments: Dict[str, Any]) -> List[TextContent]:
+        try:
+            result = self.bridge.call("apply_preset", arguments)
+        except BridgePluginNotInstalledError:
+            return [TextContent(
+                type="text",
+                text="darktable-mcp plugin not installed. Run: darktable-mcp install-plugin",
+            )]
+        except BridgeTimeoutError:
+            return [TextContent(
+                type="text",
+                text="darktable not running, or plugin not loaded. Open darktable and try again.",
+            )]
+        except BridgeError as e:
+            return [TextContent(type="text", text=f"Plugin error: {e}")]
+
+        applied = result.get("applied", 0)
+        missed = result.get("missed", [])
+        name = result.get("preset_name", arguments.get("preset_name", "?"))
+        parts = [f"Applied '{name}' to {applied} photo(s)"]
+        if missed:
+            parts.append(f"Missed (image not in library): {', '.join(missed)}")
+        return [TextContent(type="text", text="\n".join(parts))]
 
     async def _handle_apply_ratings_batch(self, arguments: Dict[str, Any]) -> List[TextContent]:
         source_dir = arguments.get("source_dir")

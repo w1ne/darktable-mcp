@@ -139,6 +139,124 @@ do
     "error message mentions source_path")
 end
 
+-- ---- methods.list_styles ---------------------------------------------------
+do
+  -- Stub dt.styles with a tiny inventory.
+  local fake_styles = {
+    {name = "alpha", description = "first style"},
+    {name = "beta", description = "second style"},
+  }
+  local original_styles = stub_dt.styles
+  stub_dt.styles = fake_styles  -- behaves like a list under ipairs
+
+  local result = internals.methods.list_styles({})
+  assertEq(result.count, 2, "list_styles returns count of styles")
+  assertEq(#result.styles, 2, "list_styles returns table of styles")
+  assertEq(result.styles[1].name, "alpha", "first style name")
+  assertEq(result.styles[1].description, "first style", "first style description")
+  assertEq(result.styles[2].name, "beta", "second style name")
+
+  stub_dt.styles = original_styles
+end
+
+-- ---- methods.apply_preset --------------------------------------------------
+do
+  -- Stub dt.styles + image:apply_style + dt.database lookup.
+  local applied_to = {}
+  local make_stub_image = function(id)
+    local img = {id = id}
+    function img:apply_style(s) table.insert(applied_to, {id = self.id, style = s.name}) end
+    return img
+  end
+
+  local fake_styles = {
+    {name = "alpha", description = "a"},
+    {name = "beta", description = "b"},
+  }
+  local original_styles = stub_dt.styles
+  local original_db = stub_dt.database
+  stub_dt.styles = fake_styles
+
+  local stub_db_inner = {}
+  stub_db_inner[101] = make_stub_image(101)
+  stub_db_inner[102] = make_stub_image(102)
+  stub_dt.database = setmetatable({}, {__index = stub_db_inner})
+
+  local result = internals.methods.apply_preset({
+    preset_name = "beta",
+    photo_ids = {"101", "102"},
+  })
+  assertEq(result.applied, 2, "apply_preset applied count")
+  assertEq(#result.missed, 0, "apply_preset no missed images")
+  assertEq(result.preset_name, "beta", "apply_preset echoes preset_name")
+  assertEq(#applied_to, 2, "apply_style invoked twice")
+  assertEq(applied_to[1].style, "beta", "applied beta to first image")
+  assertEq(applied_to[2].style, "beta", "applied beta to second image")
+
+  stub_dt.styles = original_styles
+  stub_dt.database = original_db
+end
+
+-- ---- apply_preset: missing image ID ----------------------------------------
+do
+  local fake_styles = {{name = "alpha", description = "a"}}
+  local original_styles = stub_dt.styles
+  local original_db = stub_dt.database
+  stub_dt.styles = fake_styles
+  stub_dt.database = setmetatable({}, {__index = function() return nil end})
+
+  local result = internals.methods.apply_preset({
+    preset_name = "alpha",
+    photo_ids = {"999"},
+  })
+  assertEq(result.applied, 0, "apply_preset applied=0 when image missing")
+  assertEq(#result.missed, 1, "apply_preset reports missed image")
+  assertEq(result.missed[1], "999", "missed list contains the photo_id")
+
+  stub_dt.styles = original_styles
+  stub_dt.database = original_db
+end
+
+-- ---- apply_preset: unknown style -------------------------------------------
+do
+  local fake_styles = {{name = "alpha", description = "a"}}
+  local original_styles = stub_dt.styles
+  stub_dt.styles = fake_styles
+
+  local resp = internals.handle({
+    id = "ap1",
+    method = "apply_preset",
+    params = {preset_name = "nonexistent", photo_ids = {"1"}},
+  })
+  assertEq(resp.id, "ap1", "preserves id on error")
+  assertTrue(resp.error ~= nil, "returns error for unknown style")
+  assertTrue(string.find(resp.error or "", "nonexistent") ~= nil, "names the missing style")
+
+  stub_dt.styles = original_styles
+end
+
+-- ---- apply_preset: missing preset_name -------------------------------------
+do
+  local resp = internals.handle({
+    id = "ap2",
+    method = "apply_preset",
+    params = {photo_ids = {"1"}},
+  })
+  assertTrue(resp.error ~= nil, "errors on missing preset_name")
+  assertTrue(string.find(resp.error or "", "preset_name") ~= nil, "error mentions preset_name")
+end
+
+-- ---- apply_preset: empty photo_ids -----------------------------------------
+do
+  local resp = internals.handle({
+    id = "ap3",
+    method = "apply_preset",
+    params = {preset_name = "alpha", photo_ids = {}},
+  })
+  assertTrue(resp.error ~= nil, "errors on empty photo_ids")
+  assertTrue(string.find(resp.error or "", "photo_ids") ~= nil, "error mentions photo_ids")
+end
+
 -- ---- handle: known method --------------------------------------------------
 do
   local resp = internals.handle({id = "abc", method = "view_photos", params = {limit = 1}})

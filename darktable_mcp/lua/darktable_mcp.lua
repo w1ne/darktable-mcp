@@ -273,6 +273,51 @@ methods.import_batch = function(p)
   return {imported = count, source_path = source_path, recursive = recursive}
 end
 
+methods.list_styles = function(p)
+  local out = {}
+  for _, style in ipairs(dt.styles) do
+    table.insert(out, {
+      name = style.name,
+      description = style.description,
+    })
+  end
+  return {styles = out, count = #out}
+end
+
+methods.apply_preset = function(p)
+  p = p or {}
+  local preset_name = p.preset_name
+  local photo_ids = p.photo_ids or {}
+  if not preset_name or preset_name == "" then
+    error("apply_preset: preset_name required")
+  end
+  if #photo_ids == 0 then
+    error("apply_preset: photo_ids required and non-empty")
+  end
+
+  -- Linear scan to resolve preset_name (string lookup unavailable on dt.styles).
+  local style = nil
+  for _, s in ipairs(dt.styles) do
+    if s.name == preset_name then style = s; break end
+  end
+  if not style then
+    error(string.format("apply_preset: style %q not found (use list_styles)", preset_name))
+  end
+
+  local applied = 0
+  local missed = {}
+  for _, photo_id in ipairs(photo_ids) do
+    local image = dt.database[tonumber(photo_id)]
+    if image then
+      image:apply_style(style)
+      applied = applied + 1
+    else
+      table.insert(missed, tostring(photo_id))
+    end
+  end
+  return {applied = applied, missed = missed, preset_name = preset_name}
+end
+
 -- ---- Dispatch --------------------------------------------------------------
 
 local function handle(req)

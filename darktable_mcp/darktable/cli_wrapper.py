@@ -1,6 +1,7 @@
 """Command-line wrapper for darktable operations."""
 
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,14 +15,39 @@ logger = logging.getLogger(__name__)
 class CLIWrapper:
     """Wrapper for darktable command-line operations."""
 
-    def __init__(self, darktable_cli_path: Optional[str] = None):
+    EXPORT_TIMEOUT_DEFAULT = 120
+
+    def __init__(
+        self,
+        darktable_cli_path: Optional[str] = None,
+        configdir: Optional[Path] = None,
+    ):
         """Initialize the CLI wrapper.
 
         Args:
             darktable_cli_path: Path to darktable-cli executable
                 (auto-detect if None)
+            configdir: Dedicated darktable config directory for CLI runs.
+                Defaults to `$XDG_CACHE_HOME/darktable-mcp/cli-config/`
+                so darktable-cli does not share the GUI's library.db
+                lock — exports work even when the user has darktable
+                open. Created on first use.
         """
         self.darktable_cli_path = darktable_cli_path or self._find_darktable_cli()
+        self.configdir = Path(configdir) if configdir else self._default_configdir()
+        self.configdir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _default_configdir() -> Path:
+        """Pick a per-user cache dir isolated from the GUI's `~/.config/darktable/`.
+
+        Sharing the user's main config dir means darktable-cli waits for
+        a lock that the running GUI holds and aborts with "database is
+        locked". Use the XDG cache namespace instead so each MCP install
+        gets its own throwaway library.db.
+        """
+        cache_home = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+        return Path(cache_home) / "darktable-mcp" / "cli-config"
 
     def _find_darktable_cli(self) -> str:
         """Find darktable-cli executable in system PATH.
@@ -65,6 +91,7 @@ class CLIWrapper:
         quality: int = 95,
         max_width: Optional[int] = None,
         max_height: Optional[int] = None,
+        timeout: int = EXPORT_TIMEOUT_DEFAULT,
     ) -> bool:
         """Export an image using darktable-cli.
 
@@ -75,6 +102,7 @@ class CLIWrapper:
             quality: Export quality (1-100)
             max_width: Maximum width in pixels
             max_height: Maximum height in pixels
+            timeout: subprocess timeout in seconds (default 120 s).
 
         Returns:
             bool: True if export successful
@@ -87,48 +115,31 @@ class CLIWrapper:
                 self.darktable_cli_path,
                 str(input_path),
                 str(output_path),
+                "--core",
+                "--configdir",
+                str(self.configdir),
             ]
 
-            # Add format-specific options
-            if format_type.lower() == "jpeg":
-                cmd.extend(
-                    [
-                        "--core",
-                        "--conf",
-                        f"plugins/imageio/format/jpeg/quality={quality}",
-                    ]
-                )
-            elif format_type.lower() == "png":
-                cmd.extend(
-                    [
-                        "--core",
-                        "--conf",
-                        "plugins/imageio/format/png/bpp=8",
-                    ]
-                )
-            elif format_type.lower() == "tiff":
-                cmd.extend(
-                    [
-                        "--core",
-                        "--conf",
-                        "plugins/imageio/format/tiff/bpp=8",
-                    ]
-                )
+            fmt = format_type.lower()
+            if fmt == "jpeg":
+                cmd.extend(["--conf", f"plugins/imageio/format/jpeg/quality={quality}"])
+            elif fmt == "png":
+                cmd.extend(["--conf", "plugins/imageio/format/png/bpp=8"])
+            elif fmt == "tiff":
+                cmd.extend(["--conf", "plugins/imageio/format/tiff/bpp=8"])
 
             # Add size constraints if specified
             if max_width and max_height:
                 cmd.extend(
                     [
-                        "--core",
                         "--conf",
                         f"plugins/imageio/format/jpeg/max_width={max_width}",
-                        "--core",
                         "--conf",
                         f"plugins/imageio/format/jpeg/max_height={max_height}",
                     ]
                 )
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
             if result.returncode != 0:
                 error_msg = result.stderr or "Unknown error"
@@ -138,6 +149,8 @@ class CLIWrapper:
 
         except subprocess.TimeoutExpired:
             raise ExportError("Export operation timed out")
+        except ExportError:
+            raise
         except Exception as e:
             raise ExportError(f"Failed to export image: {str(e)}")
 

@@ -26,7 +26,7 @@ client; this server drives darktable.
 
 **Export:**
 
-- `export_images(photo_ids, output_path, format, quality?)` — Export to JPEG/PNG/TIFF via `darktable-cli`.
+- `export_images(photo_ids, output_path, format, quality?)` — Export to JPEG/PNG/TIFF via `darktable-cli`. Runs in an isolated config dir under `$XDG_CACHE_HOME/darktable-mcp/cli-config/`, so exports work even when the GUI is open (no `database is locked` race against the user's `~/.config/darktable/library.db`).
 
 ## Design rules
 

@@ -16,7 +16,7 @@ client; this server drives darktable.
 
 **Camera ingest** (headless):
 
-- `import_from_camera(destination?, camera_port?, timeout_seconds?)` — Detect a camera via libgphoto2 and copy photos to a local directory.
+- `import_from_camera(destination?, camera_port?, timeout_seconds?)` — Detect a camera via libgphoto2 and copy photos to a local directory. Auto-merges hybrid setups (one card on PTP, the other mounted as USB Mass-Storage) into a single import — Nikon DSLRs in particular show up that way and the previous behavior silently halved the import.
 
 **Vision-rating workflow** (headless, file-based — no library required, needs `[vision]` extra):
 

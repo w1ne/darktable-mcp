@@ -2,6 +2,7 @@
 
 import os
 import re
+import shutil
 import subprocess
 import threading
 from datetime import date, datetime
@@ -9,6 +10,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO, Tuple
 
 from ..utils.errors import DarktableMCPError
+
+
+_MSC_PORT_PREFIX = "disk:"
+_MODEL_WORD_RE = re.compile(r"[A-Za-z0-9]{4,}")
 
 
 class CameraTools:
@@ -306,6 +311,142 @@ class CameraTools:
             if entry.is_file() and entry.name != self.PROGRESS_LOG_NAME
         )
 
+    # ---- USB Mass Storage handling -----------------------------------------
+    #
+    # Some bodies (Nikon DSLRs in particular) can simultaneously expose one
+    # card via PTP and the other as a USB Mass-Storage block device. gphoto2
+    # `--auto-detect` reports both: a normal PTP entry plus a generic
+    # "Mass Storage Camera (disk:/media/...)" entry. The pre-fix `import_from_camera`
+    # treated them as two separate cameras and made the user pick — which
+    # silently halved the import (we hit this on a real Nikon D800E shoot).
+
+    @staticmethod
+    def _is_msc_port(port: str) -> bool:
+        """True for the `disk:/...` port style gphoto2 uses for USB-MSC mounts."""
+        return port.startswith(_MSC_PORT_PREFIX)
+
+    @staticmethod
+    def _msc_mount(port: str) -> Path:
+        """Strip the `disk:` prefix and return the mount point as a Path."""
+        return Path(port[len(_MSC_PORT_PREFIX):])
+
+    @staticmethod
+    def _msc_matches_ptp(msc_port: str, ptp_model: str) -> bool:
+        """Heuristic: does this MSC mount look like the same device as a PTP camera?
+
+        Compares 4+ character word tokens (case-insensitive) shared between
+        the mount-path basename and the PTP model name. Example: mount
+        `/media/user/NIKON D800E` matches PTP model "Nikon DSC D800E"
+        because they share {"NIKON", "D800E"}. A card reader holding a
+        different brand's card won't match and stays in its own group.
+        """
+        if not msc_port.startswith(_MSC_PORT_PREFIX):
+            return False
+        basename = Path(msc_port[len(_MSC_PORT_PREFIX):]).name
+        model_words = {w.upper() for w in _MODEL_WORD_RE.findall(ptp_model)}
+        mount_words = {w.upper() for w in _MODEL_WORD_RE.findall(basename)}
+        return bool(model_words & mount_words)
+
+    def _group_cameras(
+        self, cameras: List[Dict[str, str]]
+    ) -> List[List[Dict[str, str]]]:
+        """Group MSC mounts with the PTP camera they likely belong to.
+
+        Returns a list of groups; each group is a non-empty list of camera
+        dicts that should be imported together. PTP-only cameras and
+        unmatched MSC mounts each get their own singleton group.
+
+        We pair each MSC entry with at most one PTP camera (greedy first
+        match) so two PTP cameras can't both claim the same card mount.
+        """
+        msc = [c for c in cameras if self._is_msc_port(c["port"])]
+        ptp = [c for c in cameras if not self._is_msc_port(c["port"])]
+
+        used: set = set()
+        groups: List[List[Dict[str, str]]] = []
+        for ptp_cam in ptp:
+            group = [ptp_cam]
+            for i, msc_cam in enumerate(msc):
+                if i in used:
+                    continue
+                if self._msc_matches_ptp(msc_cam["port"], ptp_cam["model"]):
+                    group.append(msc_cam)
+                    used.add(i)
+            groups.append(group)
+        for i, msc_cam in enumerate(msc):
+            if i not in used:
+                groups.append([msc_cam])
+        return groups
+
+    def _download_from_msc(
+        self,
+        mount: Path,
+        destination: Path,
+        timeout_seconds: int = DOWNLOAD_TIMEOUT_DEFAULT,
+    ) -> Tuple[int, List[str]]:
+        """Copy DCIM-shaped files from a USB Mass-Storage card mount.
+
+        Walks `<mount>/DCIM/<subdir>/` for image and video files and copies
+        each into `destination`. Files that already exist with matching size
+        are skipped (cheap idempotent resume — same-name + same-size is good
+        enough for cards where filenames are unique per device session).
+
+        timeout_seconds is accepted for API symmetry with the PTP path but
+        not enforced — filesystem copies are bounded by their own I/O.
+        """
+        del timeout_seconds  # filesystem copy doesn't need a subprocess timeout
+        destination.mkdir(parents=True, exist_ok=True)
+
+        dcim = mount / "DCIM"
+        if not dcim.is_dir():
+            return 0, [f"no DCIM/ folder under {mount}"]
+
+        images: List[Path] = []
+        for sub in sorted(dcim.iterdir()):
+            if sub.is_dir():
+                for entry in sorted(sub.iterdir()):
+                    if entry.is_file() and not entry.name.startswith("."):
+                        images.append(entry)
+
+        expected = len(images)
+        log_path = destination / self.PROGRESS_LOG_NAME
+        saved = 0
+        errors: List[str] = []
+
+        with open(log_path, "a", encoding="utf-8") as log:
+            log.write(
+                f"\n=== Import (MSC) started "
+                f"{datetime.now().isoformat(timespec='seconds')} ===\n"
+            )
+            log.write(f"Mount: {mount}\n")
+            log.write(f"Destination: {destination}\n")
+            log.write(f"Files found under DCIM: {expected}\n")
+            log.flush()
+
+            for src in images:
+                dst = destination / src.name
+                try:
+                    if dst.exists() and dst.stat().st_size == src.stat().st_size:
+                        continue
+                    shutil.copy2(src, dst)
+                    saved += 1
+                    ts = datetime.now().strftime("%H:%M:%S")
+                    log.write(f"[{ts}] ({saved}/{expected}) {src.name}\n")
+                    log.flush()
+                except OSError as exc:
+                    errors.append(f"{src.name}: {exc}")
+                    log.write(f"!! {src.name}: {exc}\n")
+                    log.flush()
+
+            log.write(
+                f"=== Import (MSC) finished "
+                f"{datetime.now().isoformat(timespec='seconds')}: "
+                f"{saved} new, {expected} found ===\n"
+            )
+            log.flush()
+
+        return saved, errors
+
     def _download_from_camera(
         self,
         model: str,
@@ -341,6 +482,16 @@ class CameraTools:
                 `timeout_seconds`. Caller is responsible; partial files may
                 remain in `destination`.
         """
+        # USB Mass-Storage entries from gphoto2 take a totally different
+        # route — gphoto2's PTP folder enumeration doesn't apply, and the
+        # files are just regular files on a mounted filesystem. Dispatch
+        # to the filesystem walker so the orchestrator above can iterate
+        # PTP+MSC pairs uniformly via this single entry point.
+        if self._is_msc_port(port):
+            return self._download_from_msc(
+                self._msc_mount(port), destination, timeout_seconds
+            )
+
         destination.mkdir(parents=True, exist_ok=True)
 
         folders = self._list_image_folders(model, port)
@@ -461,21 +612,34 @@ class CameraTools:
         if not cameras:
             raise DarktableMCPError("No camera detected. Is the camera connected and powered on?")
 
+        # Group PTP camera entries with any MSC mounts that look like the
+        # same physical device. A Nikon body in hybrid mode shows up as both
+        # a PTP camera and a "Mass Storage Camera (disk:/media/...NIKON
+        # D800E)" entry — they are one device with two cards exposed via
+        # different protocols, and both should be imported together.
+        groups = self._group_cameras(cameras)
+
         if camera_port:
-            matching = [c for c in cameras if c["port"] == camera_port]
-            if not matching:
+            target_group = next(
+                (g for g in groups if any(c["port"] == camera_port for c in g)),
+                None,
+            )
+            if target_group is None:
                 ports = ", ".join(c["port"] for c in cameras)
                 raise DarktableMCPError(
-                    f"camera_port '{camera_port}' not found. " f"Detected ports: {ports}"
+                    f"camera_port '{camera_port}' not found. "
+                    f"Detected ports: {ports}"
                 )
-            camera = matching[0]
-        elif len(cameras) > 1:
-            listing = ", ".join(f"{c['model']} ({c['port']})" for c in cameras)
+        elif len(groups) > 1:
+            listing = "; ".join(
+                " + ".join(f"{c['model']} ({c['port']})" for c in g) for g in groups
+            )
             raise DarktableMCPError(
-                f"Multiple cameras detected: {listing}. " "Pass camera_port=... to select one."
+                f"Multiple distinct cameras detected: {listing}. "
+                "Pass camera_port=... to select one."
             )
         else:
-            camera = cameras[0]
+            target_group = groups[0]
 
         if destination_arg:
             destination = Path(destination_arg).expanduser().resolve()
@@ -483,36 +647,59 @@ class CameraTools:
             today = date.today().isoformat()
             destination = (Path.home() / "Pictures" / f"import-{today}").resolve()
 
-        try:
-            count, errors = self._download_from_camera(
-                camera["model"], camera["port"], destination, timeout_seconds
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise DarktableMCPError(
-                f"Camera transfer timed out after {timeout_seconds} s. "
-                f"Destination {destination} may contain partial files. "
-                "Re-run the tool to resume — `--skip-existing` is on, so "
-                "already-copied files are not re-downloaded."
-            ) from exc
+        # Iterate every entry in the chosen group (one PTP source + zero or
+        # more MSC mounts in the common Nikon-hybrid case). A timeout on the
+        # first source is fatal — nothing has been copied yet so the user
+        # gets the resume hint. After at least one source has produced
+        # files, downstream errors are recorded but don't abort: half a
+        # successful import beats no import at all.
+        total_count = 0
+        all_errors: List[str] = []
+        for entry in target_group:
+            try:
+                count, errors = self._download_from_camera(
+                    entry["model"], entry["port"], destination, timeout_seconds
+                )
+            except subprocess.TimeoutExpired as exc:
+                if total_count == 0 and not all_errors:
+                    raise DarktableMCPError(
+                        f"Camera transfer timed out after {timeout_seconds} s. "
+                        f"Destination {destination} may contain partial files. "
+                        "Re-run the tool to resume — `--skip-existing` is on, "
+                        "so already-copied files are not re-downloaded."
+                    ) from exc
+                all_errors.append(
+                    f"{entry['model']} ({entry['port']}) timed out"
+                )
+                continue
+            except DarktableMCPError as exc:
+                if total_count == 0 and not all_errors:
+                    raise
+                all_errors.append(f"{entry['model']} ({entry['port']}): {exc}")
+                continue
+            total_count += count
+            all_errors.extend(errors)
 
-        if count == 0 and errors:
+        if total_count == 0 and all_errors:
+            first = target_group[0]
             raise DarktableMCPError(
-                f"No files were transferred from {camera['model']} "
-                f"({camera['port']}). First error: {errors[0]}"
+                f"No files were transferred from {first['model']} "
+                f"({first['port']}). First error: {all_errors[0]}"
             )
 
         log_path = destination / self.PROGRESS_LOG_NAME
         disk_count = self._count_files_on_disk(destination)
+        sources = ", ".join(f"{c['model']} ({c['port']})" for c in target_group)
 
         summary_parts = [
-            f"Copied {count} new file(s) from {camera['model']} ({camera['port']})",
+            f"Copied {total_count} new file(s) from {sources}",
             f"Destination: {destination} ({disk_count} files on disk)",
             f"Progress log: {log_path}",
             f"  Tail in another terminal during long imports: tail -f \"{log_path}\"",
             "Open darktable and choose 'import folder' on this directory to add them to your library.",
         ]
-        if errors:
+        if all_errors:
             summary_parts.append(
-                f"Warning: {len(errors)} issue(s). First: {errors[0]}"
+                f"Warning: {len(all_errors)} issue(s). First: {all_errors[0]}"
             )
         return "\n".join(summary_parts)

@@ -644,7 +644,7 @@ class TestCameraToolsImportFromCamera:
             {"model": "Canon EOS R5", "port": "usb:003,004"},
         ]
         tools = CameraTools()
-        with pytest.raises(DarktableMCPError, match="Multiple cameras"):
+        with pytest.raises(DarktableMCPError, match="Multiple distinct cameras"):
             tools.import_from_camera({})
 
     @patch.object(CameraTools, "_download_from_camera")
@@ -744,3 +744,230 @@ class TestCameraToolsImportFromCamera:
         tools.import_from_camera({"destination": str(tmp_path)})
 
         assert mock_download.call_args[0][3] == 3600
+
+
+# ----------------------------------------------------------------------------
+# USB Mass-Storage handling: hybrid Nikon-style cameras expose one card via
+# PTP and another as a USB-MSC mount. The pre-fix import_from_camera made
+# the user pick one and silently dropped the other half — these tests pin
+# the auto-merge behavior so that regression doesn't sneak back.
+# ----------------------------------------------------------------------------
+
+
+class TestCameraToolsMSCHelpers:
+    """Pure helpers around the `disk:` / Mass-Storage port style."""
+
+    def test_is_msc_port(self):
+        assert CameraTools._is_msc_port("disk:/media/user/NIKON D800E") is True
+        assert CameraTools._is_msc_port("usb:002,003") is False
+        assert CameraTools._is_msc_port("") is False
+
+    def test_msc_mount_strips_prefix(self):
+        assert CameraTools._msc_mount("disk:/media/user/NIKON D800E") == \
+            __import__("pathlib").Path("/media/user/NIKON D800E")
+
+    def test_msc_matches_ptp_for_nikon_hybrid(self):
+        # The exact case from the real session: mount basename "NIKON
+        # D800E" must match PTP model "Nikon DSC D800E" via shared 4+ char
+        # tokens {"NIKON", "D800E"}.
+        assert CameraTools._msc_matches_ptp(
+            "disk:/media/andrii/NIKON D800E", "Nikon DSC D800E"
+        ) is True
+
+    def test_msc_matches_ptp_rejects_unrelated_camera(self):
+        # A Canon card in a card reader must NOT be paired with a Nikon
+        # camera connected on PTP.
+        assert CameraTools._msc_matches_ptp(
+            "disk:/media/andrii/EOS_R5_DCIM", "Nikon DSC D800E"
+        ) is False
+
+    def test_msc_matches_ptp_returns_false_for_non_disk_port(self):
+        assert CameraTools._msc_matches_ptp("usb:002,003", "anything") is False
+
+
+class TestCameraToolsGrouping:
+    """`_group_cameras` decides which detected entries get imported together."""
+
+    def test_groups_ptp_and_matching_msc_together(self):
+        cams = [
+            {"model": "Mass Storage Camera", "port": "disk:/media/user/NIKON D800E"},
+            {"model": "Nikon DSC D800E", "port": "usb:002,003"},
+        ]
+        groups = CameraTools()._group_cameras(cams)
+        assert len(groups) == 1
+        ports = sorted(c["port"] for c in groups[0])
+        assert ports == ["disk:/media/user/NIKON D800E", "usb:002,003"]
+
+    def test_keeps_unrelated_cards_separate(self):
+        cams = [
+            {"model": "Nikon DSC D800E", "port": "usb:002,003"},
+            {"model": "Mass Storage Camera", "port": "disk:/media/user/EOS_5D_MKIV"},
+        ]
+        groups = CameraTools()._group_cameras(cams)
+        assert len(groups) == 2
+        models_per_group = [{c["model"] for c in g} for g in groups]
+        assert {"Nikon DSC D800E"} in models_per_group
+        assert {"Mass Storage Camera"} in models_per_group
+
+    def test_pure_ptp_setup_yields_one_group_per_camera(self):
+        cams = [
+            {"model": "Nikon DSC D800E", "port": "usb:002,003"},
+            {"model": "Canon EOS R5", "port": "usb:003,004"},
+        ]
+        groups = CameraTools()._group_cameras(cams)
+        assert len(groups) == 2
+
+    def test_unmatched_msc_alone_is_its_own_group(self):
+        cams = [
+            {"model": "Mass Storage Camera", "port": "disk:/media/user/SOMECARD"},
+        ]
+        groups = CameraTools()._group_cameras(cams)
+        assert len(groups) == 1
+        assert groups[0][0]["port"] == "disk:/media/user/SOMECARD"
+
+
+class TestCameraToolsDownloadFromMSC:
+    """Direct filesystem walk for USB-MSC cards."""
+
+    def _make_dcim(self, mount, layout):
+        """Build a synthetic DCIM tree under `mount`. layout is dict of
+        subfolder -> list of filenames. Files are tiny so size-compare works."""
+        for sub, files in layout.items():
+            d = mount / "DCIM" / sub
+            d.mkdir(parents=True)
+            for name in files:
+                (d / name).write_bytes(name.encode())
+
+    def test_walks_dcim_subfolders_and_copies_all_files(self, tmp_path):
+        mount = tmp_path / "card"
+        dest = tmp_path / "out"
+        self._make_dcim(mount, {
+            "100D800E": ["DSC_0001.NEF", "DSC_0002.NEF"],
+            "101D800E": ["DSC_0003.NEF"],
+        })
+        saved, errors = CameraTools()._download_from_msc(mount, dest)
+        assert saved == 3
+        assert errors == []
+        assert sorted(p.name for p in dest.iterdir() if p.suffix == ".NEF") == [
+            "DSC_0001.NEF", "DSC_0002.NEF", "DSC_0003.NEF",
+        ]
+
+    def test_skips_existing_same_size_files(self, tmp_path):
+        mount = tmp_path / "card"
+        dest = tmp_path / "out"
+        self._make_dcim(mount, {"100D800E": ["DSC_0001.NEF"]})
+        # Pre-populate the destination with an identically-sized file.
+        dest.mkdir()
+        (dest / "DSC_0001.NEF").write_bytes(b"DSC_0001.NEF")  # same length as source
+        saved, errors = CameraTools()._download_from_msc(mount, dest)
+        assert saved == 0
+        assert errors == []
+
+    def test_writes_progress_log_with_per_file_lines(self, tmp_path):
+        mount = tmp_path / "card"
+        dest = tmp_path / "out"
+        self._make_dcim(mount, {"100D800E": ["A.NEF", "B.NEF"]})
+        CameraTools()._download_from_msc(mount, dest)
+        log = (dest / ".import.log").read_text()
+        assert "Import (MSC) started" in log
+        assert "(1/2)" in log
+        assert "(2/2)" in log
+        assert "A.NEF" in log
+        assert "B.NEF" in log
+        assert "Import (MSC) finished" in log
+
+    def test_no_dcim_returns_error(self, tmp_path):
+        mount = tmp_path / "card"
+        mount.mkdir()
+        dest = tmp_path / "out"
+        saved, errors = CameraTools()._download_from_msc(mount, dest)
+        assert saved == 0
+        assert any("DCIM" in e for e in errors)
+
+
+class TestCameraToolsHybridDispatch:
+    """`_download_from_camera` routes disk:/ ports to the MSC walker."""
+
+    @patch.object(CameraTools, "_download_from_msc")
+    def test_disk_port_dispatches_to_msc(self, mock_msc, tmp_path):
+        mock_msc.return_value = (5, [])
+        result = CameraTools()._download_from_camera(
+            "Mass Storage Camera",
+            "disk:/media/user/NIKON D800E",
+            tmp_path,
+        )
+        assert result == (5, [])
+        mock_msc.assert_called_once()
+        called_mount = mock_msc.call_args[0][0]
+        assert str(called_mount) == "/media/user/NIKON D800E"
+
+    @patch.object(CameraTools, "_download_one_folder")
+    @patch.object(CameraTools, "_count_files_in_folder", return_value=None)
+    @patch.object(CameraTools, "_list_image_folders", return_value=["/store/DCIM/101"])
+    @patch.object(CameraTools, "_download_from_msc")
+    def test_usb_port_does_not_use_msc(
+        self, mock_msc, _mock_list, _mock_count, mock_download, tmp_path
+    ):
+        mock_download.return_value = (3, [])
+        CameraTools()._download_from_camera(
+            "Nikon DSC D800E", "usb:002,003", tmp_path
+        )
+        mock_msc.assert_not_called()
+
+
+class TestCameraToolsImportFromCameraHybrid:
+    """`import_from_camera` auto-merges PTP + matching MSC into one import."""
+
+    @patch.object(CameraTools, "_download_from_camera")
+    @patch.object(CameraTools, "_detect_cameras")
+    def test_hybrid_nikon_imports_from_both_sources_without_camera_port(
+        self, mock_detect, mock_download, tmp_path
+    ):
+        # The exact pair we hit on the real D800E shoot: PTP camera + a
+        # generic Mass-Storage entry whose mount path identifies it as the
+        # same Nikon body.
+        mock_detect.return_value = [
+            {"model": "Nikon DSC D800E", "port": "usb:002,006"},
+            {"model": "Mass Storage Camera", "port": "disk:/media/user/NIKON D800E"},
+        ]
+        mock_download.return_value = (10, [])
+        tools = CameraTools()
+        summary = tools.import_from_camera({"destination": str(tmp_path)})
+        # Both sources were imported, totals are summed.
+        assert mock_download.call_count == 2
+        called_ports = sorted(call.args[1] for call in mock_download.call_args_list)
+        assert called_ports == ["disk:/media/user/NIKON D800E", "usb:002,006"]
+        assert "Copied 20 new file(s)" in summary
+
+    @patch.object(CameraTools, "_download_from_camera")
+    @patch.object(CameraTools, "_detect_cameras")
+    def test_hybrid_with_camera_port_picks_the_group_containing_that_port(
+        self, mock_detect, mock_download, tmp_path
+    ):
+        mock_detect.return_value = [
+            {"model": "Nikon DSC D800E", "port": "usb:002,006"},
+            {"model": "Mass Storage Camera", "port": "disk:/media/user/NIKON D800E"},
+        ]
+        mock_download.return_value = (4, [])
+        tools = CameraTools()
+        # Picking the MSC port still pulls the whole group (because the
+        # pair is one logical device).
+        tools.import_from_camera({
+            "destination": str(tmp_path),
+            "camera_port": "disk:/media/user/NIKON D800E",
+        })
+        assert mock_download.call_count == 2
+
+    @patch.object(CameraTools, "_download_from_camera")
+    @patch.object(CameraTools, "_detect_cameras")
+    def test_two_unrelated_cameras_still_require_camera_port(
+        self, mock_detect, mock_download, tmp_path
+    ):
+        mock_detect.return_value = [
+            {"model": "Nikon DSC D800E", "port": "usb:002,006"},
+            {"model": "Mass Storage Camera", "port": "disk:/media/user/EOS_5D_MKIV"},
+        ]
+        tools = CameraTools()
+        with pytest.raises(DarktableMCPError, match="Multiple distinct"):
+            tools.import_from_camera({"destination": str(tmp_path)})
+        mock_download.assert_not_called()

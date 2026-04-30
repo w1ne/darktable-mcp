@@ -442,14 +442,39 @@ class DarktableMCPServer:
             ]
 
         input_files = [Path(p) for p in photo_ids]
+        out_dir = Path(output_path)
         results = self.cli.batch_export(
             input_files=input_files,
-            output_dir=Path(output_path),
+            output_dir=out_dir,
             format_type=format_type,
             quality=quality,
         )
-        body = "\n".join(f"{src}: {status}" for src, status in results.items())
-        return [TextContent(type="text", text=body or "No files processed")]
+        # Stash per-file results in a JSONL side file. The full per-file map
+        # blew Claude's token budget at 400+ files, so the response stays
+        # short and the agent reads the side file when it actually wants
+        # details.
+        side_file = out_dir / ".export_images.jsonl"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ok = fail = 0
+        first_error: Optional[str] = None
+        with side_file.open("w") as fh:
+            for src, status in results.items():
+                is_error = status.startswith("Error") or "failed" in status.lower()
+                fh.write(json.dumps({"input": src, "status": status}) + "\n")
+                if is_error:
+                    fail += 1
+                    if first_error is None:
+                        first_error = f"{src}: {status[:200]}"
+                else:
+                    ok += 1
+        summary = [
+            f"exported: {ok}, failed: {fail}",
+            f"output_dir: {out_dir}",
+            f"details: {side_file} (JSONL, one line per file: input, status)",
+        ]
+        if first_error:
+            summary.append(f"first error: {first_error}")
+        return [TextContent(type="text", text="\n".join(summary))]
 
     async def _handle_extract_previews(self, arguments: Dict[str, Any]) -> List[TextContent]:
         source_dir = arguments.get("source_dir")
@@ -462,8 +487,7 @@ class DarktableMCPServer:
             thumb_dim=int(arguments.get("thumb_dim", 384)),
             overwrite=bool(arguments.get("overwrite", False)),
         )
-        body = format_extract_summary(result) + "\n\n" + json.dumps(result["items"], indent=2)
-        return [TextContent(type="text", text=body)]
+        return [TextContent(type="text", text=format_extract_summary(result))]
 
     async def _handle_open_in_darktable(self, arguments: Dict[str, Any]) -> List[TextContent]:
         source_dir = arguments.get("source_dir")

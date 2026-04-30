@@ -253,12 +253,22 @@ def extract_previews(
             errors += 1
         items.append(item)
 
+    # Write per-item details to a JSONL side file so the MCP tool response
+    # can stay short (one entry per file blew Claude's token budget at ~700+
+    # NEFs). Agents pull the full data with the regular Read tool when they
+    # actually need it.
+    side_file = out_dir / ".extract_previews.jsonl"
+    with side_file.open("w") as fh:
+        for it in items:
+            fh.write(json.dumps(it) + "\n")
+
     return {
         "output_dir": str(out_dir),
         "thumb_dir": str(thumb_dir) if thumb_dir is not None else None,
         "extracted": extracted,
         "skipped": skipped,
         "errors": errors,
+        "side_file": str(side_file),
         "items": items,
     }
 
@@ -351,14 +361,21 @@ def apply_ratings_batch(
 
 def format_extract_summary(result: Mapping[str, Any]) -> str:
     """Human-readable summary of ``extract_previews`` for tool TextContent."""
-    return (
-        f"output_dir: {result['output_dir']}\n"
-        f"thumb_dir: {result.get('thumb_dir')}\n"
+    item_count = len(result.get("items", []))
+    lines = [
+        f"output_dir: {result['output_dir']}",
+        f"thumb_dir: {result.get('thumb_dir')}",
         f"extracted: {result['extracted']}, "
         f"skipped: {result['skipped']}, "
-        f"errors: {result['errors']}\n"
-        f"items: {len(result['items'])}"
-    )
+        f"errors: {result['errors']}",
+        f"items: {item_count}",
+    ]
+    side_file = result.get("side_file")
+    if side_file:
+        lines.append(
+            f"details: {side_file} (JSONL, one line per file: stem, paths, EXIF, size, error)"
+        )
+    return "\n".join(lines)
 
 
 def format_ratings_summary(result: Mapping[str, Any]) -> str:

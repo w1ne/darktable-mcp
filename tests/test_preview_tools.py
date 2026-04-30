@@ -135,6 +135,45 @@ class TestExtractPreviews:
         assert result["errors"] == 0
         assert result["items"] == []
         assert (tmp_path / ".previews").is_dir()
+        # Even on an empty source dir, a side file is created (empty).
+        side = Path(result["side_file"])
+        assert side.exists()
+        assert side.read_text() == ""
+
+    def test_side_file_has_one_jsonl_line_per_item(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The full per-file detail moved out of the function's return into a
+        JSONL side file. Verify the file is exactly one parseable line per item.
+
+        We bypass the vision deps by stubbing _import_vision_libs and seeding
+        the items list manually — the JSONL writer doesn't care which path
+        produced the items.
+        """
+        from darktable_mcp.tools import preview_tools as pt
+
+        # Stub the vision libs so the function can run without rawpy/PIL.
+        monkeypatch.setattr(
+            pt, "_import_vision_libs", lambda: (None, None, None, None)
+        )
+        # Empty source dir → items list will be []; we need at least one fake
+        # raw to exercise the per-file write path. Easiest: run twice — once
+        # to produce an empty side file (covered above), and a second pass
+        # where we synthesize items by patching iterdir.
+        fake_raws = [tmp_path / "DSC_0001.NEF", tmp_path / "DSC_0002.NEF"]
+        for r in fake_raws:
+            r.write_bytes(b"\xff" * 10)
+
+        # Force the read path to fail (no vision deps) so each item is
+        # recorded with an error — that's still a valid per-item record.
+        result = pt.extract_previews(tmp_path)
+        side = Path(result["side_file"])
+        lines = [json.loads(l) for l in side.read_text().splitlines()]
+        assert len(lines) == 2
+        assert {l["stem"] for l in lines} == {"DSC_0001", "DSC_0002"}
+        # Each line should be a complete record with the expected keys.
+        for entry in lines:
+            assert {"stem", "source", "preview", "exif", "size", "error"} <= entry.keys()
 
 
 class TestFormatHelpers:
@@ -152,6 +191,36 @@ class TestFormatHelpers:
         assert "/tmp/p" in text
         assert "extracted: 3" in text
         assert "skipped: 1" in text
+
+    def test_extract_summary_mentions_side_file_when_present(self) -> None:
+        text = format_extract_summary(
+            {
+                "output_dir": "/tmp/p",
+                "thumb_dir": None,
+                "extracted": 5,
+                "skipped": 0,
+                "errors": 0,
+                "side_file": "/tmp/p/.extract_previews.jsonl",
+                "items": [],
+            }
+        )
+        assert ".extract_previews.jsonl" in text
+        assert "details:" in text or "side_file" in text or "JSONL" in text
+
+    def test_extract_summary_back_compat_without_side_file(self) -> None:
+        # Old callers that don't set side_file still get a clean summary.
+        text = format_extract_summary(
+            {
+                "output_dir": "/tmp/p",
+                "thumb_dir": None,
+                "extracted": 1,
+                "skipped": 0,
+                "errors": 0,
+                "items": [{}],
+            }
+        )
+        assert "extracted: 1" in text
+        assert ".jsonl" not in text  # no side file mentioned when absent
 
     def test_ratings_summary_lists_failures(self) -> None:
         text = format_ratings_summary(

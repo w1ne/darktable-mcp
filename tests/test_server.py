@@ -246,3 +246,53 @@ async def test_handle_apply_preset_friendly_error_when_dt_not_running():
         "photo_ids": ["1"], "preset_name": "x",
     })
     assert "darktable" in result[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_export_images_writes_side_file_and_short_summary(tmp_path):
+    """`export_images` used to dump the full per-file map inline, blowing
+    Claude's token budget at 400+ files. The handler now writes per-file
+    results to a JSONL side file and returns only counts + the path."""
+    import json
+
+    server = DarktableMCPServer()
+    fake_results = {
+        "/in/A.NEF": f"Exported to {tmp_path}/A.jpg",
+        "/in/B.NEF": f"Exported to {tmp_path}/B.jpg",
+        "/in/C.NEF": "Error: Failed to export image: Export failed: Boom",
+    }
+    server._cli = Mock()
+    server._cli.batch_export.return_value = fake_results
+
+    result = await server._handle_export_images({
+        "photo_ids": ["/in/A.NEF", "/in/B.NEF", "/in/C.NEF"],
+        "output_path": str(tmp_path),
+        "format": "jpeg",
+        "quality": 95,
+    })
+    text = result[0].text
+
+    # Summary stays compact: counts + side file pointer + first error.
+    assert "exported: 2" in text
+    assert "failed: 1" in text
+    assert ".export_images.jsonl" in text
+    assert "Boom" in text  # first error gets a short snippet
+    # Crucially, the per-file output map is NOT inlined.
+    assert "/in/A.NEF" not in text
+    assert "/in/B.NEF" not in text
+
+    # Side file holds the full record, one JSON per line.
+    side = tmp_path / ".export_images.jsonl"
+    assert side.exists()
+    lines = [json.loads(l) for l in side.read_text().splitlines()]
+    assert len(lines) == 3
+    assert {l["input"] for l in lines} == set(fake_results)
+
+
+@pytest.mark.asyncio
+async def test_handle_export_images_validates_required_args():
+    server = DarktableMCPServer()
+    r = await server._handle_export_images({"photo_ids": ["/x"]})
+    assert "output_path" in r[0].text
+    r = await server._handle_export_images({"output_path": "/tmp/x"})
+    assert "photo_ids" in r[0].text

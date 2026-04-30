@@ -75,11 +75,32 @@ do
   local result = internals.methods.view_photos({filter = "OTHER", limit = 10})
   assertEq(#result, 1, "view_photos filter=OTHER returns 1 image")
   assertEq(result[1].filename, "OTHER.NEF", "view_photos filter result filename")
+  -- view_photos must return the absolute file path (dir + filename), not
+  -- just the directory. Otherwise it doesn't compose with export_images,
+  -- which takes file paths in `photo_ids`.
+  assertEq(result[1].path, "/photos/OTHER.NEF",
+    "view_photos returns absolute file path")
 end
 
 do
   local result = internals.methods.view_photos({limit = 2})
   assertEq(#result, 2, "view_photos limit=2 caps at 2")
+end
+
+-- ---- methods.view_photos: trailing-slash dir handling ---------------------
+do
+  -- Some darktable backends include a trailing slash on image.path; some
+  -- don't. The plugin must normalize both into a single-slash full path.
+  local trail_img = {id = 999, filename = "TRAIL.NEF", path = "/photos/", rating = 0}
+  images_by_id[999] = trail_img
+  table.insert(iter_list, trail_img)
+  local result = internals.methods.view_photos({filter = "TRAIL", limit = 10})
+  assertEq(#result, 1, "view_photos trailing-slash filter returns 1 image")
+  assertEq(result[1].path, "/photos/TRAIL.NEF",
+    "view_photos collapses double slash from trailing-dir input")
+  -- Cleanup so later tests that count totals don't trip.
+  images_by_id[999] = nil
+  table.remove(iter_list)
 end
 
 -- ---- methods.rate_photos ---------------------------------------------------

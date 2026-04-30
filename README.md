@@ -8,7 +8,7 @@ client; this server drives darktable.
 
 **Library operations** (require `darktable-mcp install-plugin` and an open darktable session):
 
-- `view_photos(filter?, rating_min?, limit?)` — Browse the library by filename substring and minimum rating.
+- `view_photos(filter?, rating_min?, limit?)` — Browse the library by filename substring and minimum rating. Returns id, filename, **absolute file path**, and rating per match — the path drops straight into `export_images`'s `photo_ids`.
 - `rate_photos(photo_ids, rating)` — Apply -1..5 star ratings (-1 = reject, 0 = unrated).
 - `import_batch(source_path, recursive?)` — Register a folder as a film roll.
 - `list_styles()` — Enumerate installed darktable styles (presets), returning name + description per entry.

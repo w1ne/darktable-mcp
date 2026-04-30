@@ -76,14 +76,19 @@ async def test_handle_view_photos_returns_formatted_list():
     server = DarktableMCPServer()
     server.bridge = Mock()
     server.bridge.call.return_value = [
-        {"id": "1", "filename": "a.NEF", "path": "/p", "rating": 5},
-        {"id": "2", "filename": "b.NEF", "path": "/p", "rating": 4},
+        {"id": "1", "filename": "a.NEF", "path": "/photos/a.NEF", "rating": 5},
+        {"id": "2", "filename": "b.NEF", "path": "/photos/b.NEF", "rating": 4},
     ]
     result = await server._handle_view_photos({"filter": "", "limit": 10})
     assert len(result) == 1
     text = result[0].text
     assert "a.NEF" in text
     assert "b.NEF" in text
+    # The absolute file path must be in the formatted output so the agent
+    # can pass it straight to export_images. Otherwise view_photos and
+    # export_images don't compose.
+    assert "/photos/a.NEF" in text
+    assert "/photos/b.NEF" in text
     server.bridge.call.assert_called_once_with(
         "view_photos", {"filter": "", "limit": 10}
     )

@@ -184,6 +184,15 @@ end
 
 local methods = {}
 
+-- darktable's image.path is the parent directory; image.filename is the
+-- bare basename. Callers want a single absolute file path they can hand
+-- straight to export_images / Read / etc., so join them once here.
+local function _image_full_path(image)
+  local dir = image.path or ""
+  if #dir > 0 and dir:sub(-1) ~= "/" then dir = dir .. "/" end
+  return dir .. (image.filename or "")
+end
+
 methods.view_photos = function(p)
   p = p or {}
   local out, count = {}, 0
@@ -202,7 +211,7 @@ methods.view_photos = function(p)
       table.insert(out, {
         id = tostring(image.id),
         filename = image.filename,
-        path = image.path,
+        path = _image_full_path(image),
         rating = image.rating or 0,
       })
       count = count + 1

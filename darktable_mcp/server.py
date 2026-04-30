@@ -76,9 +76,10 @@ class DarktableMCPServer:
                 description=(
                     "Browse photos in the user's darktable library. Filter by "
                     "filename substring, minimum star rating, or both. Returns "
-                    "id, filename, path, and rating per match. Requires darktable "
-                    "to be running with the darktable-mcp Lua plugin installed "
-                    "(see darktable-mcp install-plugin)."
+                    "id, filename, absolute file path, and rating per match — "
+                    "the path can be passed straight into export_images. "
+                    "Requires darktable to be running with the darktable-mcp "
+                    "Lua plugin installed (see darktable-mcp install-plugin)."
                 ),
                 inputSchema={
                     "type": "object",
@@ -373,7 +374,8 @@ class DarktableMCPServer:
                 name="export_images",
                 description=(
                     "Export photos to JPEG/PNG/TIFF via darktable-cli. "
-                    "Pass absolute file paths in photo_ids."
+                    "Pass absolute file paths in photo_ids — the `path` field "
+                    "from view_photos drops in directly."
                 ),
                 inputSchema={
                     "type": "object",
@@ -520,10 +522,15 @@ class DarktableMCPServer:
 
         if not photos:
             return [TextContent(type="text", text="No photos found matching criteria")]
+        # Surface the absolute file path so the agent can hand it straight to
+        # export_images (which takes file paths in `photo_ids`). Without this
+        # the two tools don't compose: view_photos returns IDs, export wants
+        # paths, and the agent has no way to bridge the two.
         lines = [f"Found {len(photos)} photos:"]
         for p in photos:
             stars = "⭐" * (p.get("rating") or 0)
-            lines.append(f"ID: {p['id']} | {p['filename']} | Rating: {stars}")
+            path = p.get("path") or ""
+            lines.append(f"ID: {p['id']} | {p['filename']} | Rating: {stars} | {path}")
         return [TextContent(type="text", text="\n".join(lines))]
 
     async def _handle_rate_photos(self, arguments: Dict[str, Any]) -> List[TextContent]:

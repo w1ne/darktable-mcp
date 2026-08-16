@@ -1,6 +1,5 @@
 """Command-line wrapper for darktable operations."""
 
-import itertools
 import logging
 import os
 import re
@@ -37,6 +36,27 @@ def _output_extension(format_type: str) -> str:
     """Return the file extension darktable-cli actually writes for a format."""
     fmt = format_type.lower()
     return FORMAT_EXTENSIONS.get(fmt, fmt)
+
+
+def _normalized_output_path(output_path: Path, format_type: str) -> Path:
+    """Rewrite an output path to the extension darktable-cli will really use.
+
+    `export_image(src, dst / "out.jpeg", "jpeg")` is a reasonable call, but
+    darktable-cli writes `out.jpg` and the post-export check would then stat
+    a name that never existed. Normalising first means the caller is handed
+    the path the file is actually at.
+
+    Args:
+        output_path: Destination the caller asked for
+        format_type: Export format the destination is written in
+
+    Returns:
+        Path: `output_path` carrying the format's real extension
+    """
+    suffix = f".{_output_extension(format_type)}"
+    if output_path.suffix.lower() == suffix:
+        return output_path
+    return output_path.with_suffix(suffix)
 
 
 @dataclass
@@ -89,21 +109,52 @@ class CLIWrapper:
         # output file at all (observed on darktable 5.6.0 — two parallel
         # exports, only one file written, both exiting non-zero with nothing
         # but a "notice:" on stderr). Hand every worker thread its own
-        # sub-configdir instead. Threads are reused across the batch, so this
-        # costs one library.db per worker, not per file.
+        # sub-configdir instead. Slots are handed back when their thread dies,
+        # so the directories on disk are bounded by *peak concurrency*, not by
+        # how many threads the process has ever run: every `batch_export` call
+        # builds a fresh pool, and without reuse each batch would leave another
+        # full configdir (library.db, data.db, darktablerc) behind forever.
         self._thread_state = threading.local()
-        self._slot_counter = itertools.count()
+        self._slot_lock = threading.Lock()
+        self._slot_owners: dict[int, threading.Thread] = {}
+
+    def _claim_slot(self) -> int:
+        """Reserve a configdir slot for the calling thread, reusing dead ones.
+
+        A slot is only reused once its previous owner has exited, so two
+        live threads never point at the same library.db — which is the whole
+        reason the configdir is split.
+
+        Returns:
+            int: Slot index owned by the calling thread
+        """
+        current = threading.current_thread()
+        with self._slot_lock:
+            for slot, owner in self._slot_owners.items():
+                if not owner.is_alive():
+                    self._slot_owners[slot] = current
+                    return slot
+
+            slot = len(self._slot_owners)
+            self._slot_owners[slot] = current
+            return slot
 
     def _worker_configdir(self) -> Path:
         """Return a configdir private to the calling thread.
 
-        The main thread keeps `self.configdir` itself, so single-threaded
-        callers and existing behaviour are unchanged; pool workers get
-        `<configdir>/worker-N/`.
+        Whichever thread asks first takes `self.configdir` itself — in a
+        batch that is the first pool worker, not the main thread — and every
+        other *concurrently live* thread gets `<configdir>/worker-N/`. Slots
+        are recycled once their thread has exited, so a long-lived server
+        running many batches keeps a bounded number of these directories
+        rather than one per thread it has ever spawned.
+
+        Returns:
+            Path: Existing directory no other live thread is using
         """
         slot = getattr(self._thread_state, "slot", None)
         if slot is None:
-            slot = next(self._slot_counter)
+            slot = self._claim_slot()
             self._thread_state.slot = slot
         if slot == 0:
             return self.configdir
@@ -170,7 +221,7 @@ class CLIWrapper:
         max_width: Optional[int] = None,
         max_height: Optional[int] = None,
         timeout: int = EXPORT_TIMEOUT_DEFAULT,
-    ) -> bool:
+    ) -> Path:
         """Export an image using darktable-cli.
 
         A zero exit code from darktable-cli is not proof of an export:
@@ -178,9 +229,17 @@ class CLIWrapper:
         output path is stat'ed afterwards and a missing or empty file is
         reported as a failure.
 
+        `output_path` is normalised to the extension darktable-cli really
+        writes for `format_type` before anything else happens, because it
+        renames the output regardless of what it was asked for. Asking for
+        `out.jpeg` therefore succeeds and returns `out.jpg`; only the
+        normalised path is ever stat'ed, so a genuinely empty export is
+        still caught.
+
         Args:
             input_path: Path to input image
-            output_path: Path for output image
+            output_path: Path for output image; the extension is corrected
+                to the one the format actually produces
             format_type: Export format (jpeg, png, tiff)
             quality: Export quality (1-100)
             max_width: Maximum width in pixels, or None for unconstrained.
@@ -191,16 +250,17 @@ class CLIWrapper:
             timeout: subprocess timeout in seconds (default 120 s).
 
         Returns:
-            bool: True if export successful
+            Path: The file darktable-cli actually wrote
 
         Raises:
             ExportError: If export fails, times out, or produces no file
         """
         try:
+            written_path = _normalized_output_path(output_path, format_type)
             cmd = [
                 self.darktable_cli_path,
                 str(input_path),
-                str(output_path),
+                str(written_path),
             ]
 
             # Size constraints: darktable-cli takes both bounds as first-class
@@ -229,9 +289,9 @@ class CLIWrapper:
                 error_msg = result.stderr or "Unknown error"
                 raise ExportError(f"Export failed: {error_msg}")
 
-            self._assert_output_written(output_path)
+            self._assert_output_written(written_path)
 
-            return True
+            return written_path
 
         except subprocess.TimeoutExpired:
             raise ExportError("Export operation timed out")
@@ -399,10 +459,12 @@ class CLIWrapper:
             timeout: subprocess timeout in seconds
 
         Returns:
-            ExportResult: Never raises; failures land in `error`.
+            ExportResult: Never raises; failures land in `error`. `output`
+            is the path darktable-cli really wrote, or None when nothing
+            reached disk.
         """
         try:
-            self.export_image(
+            written = self.export_image(
                 input_file,
                 output_file,
                 format_type,
@@ -413,16 +475,21 @@ class CLIWrapper:
             )
         except Exception as e:
             logger.error("Failed to export %s: %s", input_file, e)
+            # A failed export may still have left a partial file behind; report
+            # it under the name darktable-cli would have used, not the one the
+            # caller asked for.
+            attempted = _normalized_output_path(output_file, format_type)
             return ExportResult(
                 input=str(input_file),
-                output=str(output_file) if output_file.exists() else None,
+                output=str(attempted) if attempted.exists() else None,
                 ok=False,
                 error=str(e),
             )
 
+        # export_image has already proven this path holds a non-empty file.
         return ExportResult(
             input=str(input_file),
-            output=str(output_file) if output_file.exists() else None,
+            output=str(written),
             ok=True,
             error=None,
         )

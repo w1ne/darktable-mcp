@@ -154,6 +154,51 @@ def test_import_batch_does_not_echo_an_unhonoured_recursive_flag():
     )
 
 
+def test_stale_age_outlasts_every_client_timeout():
+    """The sweep must never delete a request whose caller is still waiting.
+
+    The Lua worker is single-threaded, so a request can sit queued behind a
+    call that legitimately runs for its full budget. With STALE_AGE_SECONDS at
+    60 -- shorter than the 120s ``import_batch`` / ``apply_preset`` budgets --
+    the sweep deleted the queued ``request-*.json`` before the worker ever got
+    to it, and its caller waited out the whole 120s to be told "darktable is
+    not running".
+
+    This is the only place the two halves of the invariant are compared, since
+    the numbers live in different languages.
+    """
+    from darktable_mcp.bridge.client import DEFAULT_TIMEOUTS, FALLBACK_TIMEOUT
+
+    source = PLUGIN.read_text(encoding="utf-8")
+    match = re.search(r"^local STALE_AGE_SECONDS\s*=\s*(\d+)", source, re.MULTILINE)
+    assert match is not None, "STALE_AGE_SECONDS not found in the plugin"
+    stale_age = int(match.group(1))
+
+    max_client_timeout = max([*DEFAULT_TIMEOUTS.values(), FALLBACK_TIMEOUT])
+    assert stale_age > 120, (
+        f"STALE_AGE_SECONDS is {stale_age}s; it must exceed the 120s client "
+        "budgets or the sweep deletes live requests"
+    )
+    assert stale_age > max_client_timeout, (
+        f"STALE_AGE_SECONDS ({stale_age}s) must exceed the largest client "
+        f"budget in DEFAULT_TIMEOUTS ({max_client_timeout}s). Raise the stale "
+        "age, or the sweep will delete requests whose callers are still "
+        "waiting for them."
+    )
+    # sweep_stale floors the age to whole minutes for `find -mmin`, so check
+    # the value that actually reaches find, not the constant.
+    assert (stale_age // 60) * 60 > max_client_timeout, (
+        f"STALE_AGE_SECONDS ({stale_age}s) rounds down to "
+        f"{(stale_age // 60) * 60}s for find -mmin, which no longer clears the "
+        f"{max_client_timeout}s client budget"
+    )
+    # The comment is the only thing that will warn whoever edits either number.
+    assert "DEFAULT_TIMEOUTS" in source, (
+        "the STALE_AGE_SECONDS invariant no longer names DEFAULT_TIMEOUTS as "
+        "the thing it must stay ahead of"
+    )
+
+
 def test_sweep_covers_orphan_responses():
     """sweep_stale must collect response-*.json, not just request-*.json.
 

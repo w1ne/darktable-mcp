@@ -300,13 +300,43 @@ def _resolve_raw_for_stem(source_dir: Path, stem: str) -> Optional[Path]:
     return matches[0] if matches else None
 
 
+def _sample_umask() -> int:
+    """Read the process umask by setting it to 0 and immediately putting it back.
+
+    There is no read-only umask call on POSIX, so this is the only portable way
+    to learn the value — and it is why the result must be cached rather than
+    re-derived per write. See ``_NEW_FILE_MODE``.
+
+    Returns:
+        The umask in force when this ran.
+    """
+    umask = os.umask(0)
+    os.umask(umask)
+    return umask
+
+
+# Mode for a sidecar we create from scratch, matching what a plain `open()`
+# would have produced (0644 under the usual 022 umask) instead of `mkstemp`'s
+# 0600. Sampled once, at import, on purpose: probing the umask blanks it
+# process-wide for an instant, and this server is multithreaded — every MCP
+# handler runs under `asyncio.to_thread` and `extract_previews` drives its own
+# ThreadPoolExecutor — so a file or directory another thread creates inside
+# that window (e.g. `out_path.parent.mkdir`) would land world-writable. Probing
+# per write would reopen that race once per new sidecar, hundreds of times in a
+# large batch. The trade: a host process that calls `os.umask()` after import
+# is not tracked here. That is the right way round — a server changing its
+# umask mid-flight is far rarer than concurrent writes.
+_NEW_FILE_MODE = 0o666 & ~_sample_umask()
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     """Write ``data`` to ``path`` atomically via a temp file in the same directory.
 
     An interrupted run can then never leave a truncated sidecar behind: the
     original file survives untouched until ``os.replace`` swaps it in one step.
     The replacement keeps the original file's permissions (``mkstemp`` would
-    otherwise silently tighten a 0644 sidecar to 0600).
+    otherwise silently tighten a 0644 sidecar to 0600); a brand-new sidecar
+    gets ``_NEW_FILE_MODE``. Never touches the process umask.
     """
     try:
         mode: Optional[int] = path.stat().st_mode & 0o777
@@ -319,11 +349,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        if mode is None:
-            umask = os.umask(0)
-            os.umask(umask)
-            mode = 0o666 & ~umask
-        os.chmod(tmp_name, mode)
+        os.chmod(tmp_name, _NEW_FILE_MODE if mode is None else mode)
         os.replace(tmp_name, path)
     except BaseException:
         try:

@@ -20,26 +20,49 @@ logger = logging.getLogger(__name__)
 _MSC_PORT_PREFIX = "disk:"
 _MODEL_WORD_RE = re.compile(r"[A-Za-z0-9]{4,}")
 _TAG_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+#: `gphoto2 --get-config serialnumber` prints a `Current: <value>` line.
+_SERIAL_CURRENT_RE = re.compile(r"^Current:\s*(.+?)\s*$", re.MULTILINE)
+#: Words that carry no device identity. gphoto2 calls every USB-Mass-Storage
+#: mount "Mass Storage Camera", so a model made only of these contributes
+#: nothing to a destination tag and is dropped rather than baked in.
+_GENERIC_MODEL_WORDS = frozenset({"MASS", "STORAGE", "CAMERA", "USB", "DISK", "GENERIC"})
 
 
 class CameraTools:
     """Camera import via gphoto2 (libgphoto2 — same library darktable's GUI uses).
 
     Destination layout: every source folder gets its own subdirectory under
-    the destination, `<destination>/<source-folder-tag>/<filename>`. Camera
-    filenames are only unique *within* one folder — `100NCD80/DSC_0001.NEF`
-    and `101NCD80/DSC_0001.NEF` are different photos, and so are the two
-    `DSC_0001.NEF` on the two cards of a dual-slot body. Flattening every
-    folder into one directory made the second one vanish (gphoto2's
-    `--skip-existing` / the MSC size compare treated it as already copied),
-    which is silent data loss. Per-folder subdirectories make that
-    impossible while keeping resume cheap: a skip can now only happen for
-    the same name in the same source folder.
+    the destination, `<destination>/<camera-identity>_<source-folder-tag>/`.
+    Camera filenames are only unique *within* one folder on one body —
+    `100NCD80/DSC_0001.NEF` and `101NCD80/DSC_0001.NEF` are different
+    photos, so are the two `DSC_0001.NEF` on the two cards of a dual-slot
+    body, and so are the `DSC_0001.NEF` of two different Nikon bodies whose
+    gphoto2 folder paths are byte-identical (`/store_00010001/DCIM/100NCD80`
+    is generic across bodies). Flattening any of those onto one path made
+    the newcomer vanish — gphoto2's `--skip-existing` and the MSC size
+    compare both read it as "already copied" — which is silent data loss.
+
+    Two things prevent that now:
+
+    1. The destination tag carries the camera's identity: a sanitised model
+       plus, when the body reports one, its serial number. The tag is
+       derived only from things that are stable across unplug/replug (never
+       from the gphoto2 port, which is reassigned), so re-running into the
+       same destination is still a cheap idempotent resume.
+    2. On the MSC path, an existing destination file is only ever treated as
+       "already copied" when it still looks like the same file. Anything
+       else is written under a distinct name; nothing is overwritten.
+
+    What is still *not* guaranteed: two bodies of the same model that report
+    no serial number share a tag. On the MSC path point 2 keeps both files
+    regardless. On the PTP path gphoto2's own `--skip-existing` decides, and
+    it compares nothing but the path — see `_download_one_folder`.
     """
 
     DOWNLOAD_TIMEOUT_DEFAULT = 3600
     LIST_FOLDERS_TIMEOUT = 30
     NUM_FILES_TIMEOUT = 30
+    SERIAL_TIMEOUT = 15
     PROGRESS_LOG_NAME = ".import.log"
     #: Subdirectory used when the camera folder tree could not be enumerated
     #: and a single recursive download from "/" is used instead.
@@ -47,6 +70,16 @@ class CameraTools:
     #: Marker that lets `import_from_camera` pick post-flight shortfalls out
     #: of the generic error list and show them prominently.
     SHORTFALL_PREFIX = "Post-flight check:"
+    #: Marker for "this file could not keep its own name, both were kept".
+    #: Not a failure, but the user must be told which file is which.
+    RENAMED_PREFIX = "Name conflict:"
+    #: Bytes read from each end of a file when deciding "is this the same
+    #: photo we already copied?". See `_looks_like_same_file`.
+    EDGE_SAMPLE_BYTES = 8192
+    #: Upper bound on `-2`, `-3`, ... suffixes tried before giving up on a
+    #: name. Reaching it means something is badly wrong; we error instead of
+    #: looping or overwriting.
+    MAX_DISTINCT_SUFFIX = 99
 
     _FOLDER_LINE_RE = re.compile(r"There (?:is|are) (\d+) folders? in folder '([^']+)'\.")
     _NUM_FILES_RE = re.compile(r":\s*(\d+)\s*$", re.MULTILINE)
@@ -208,6 +241,102 @@ class CameraTools:
         match = self._NUM_FILES_RE.search(result.stdout)
         return int(match.group(1)) if match else None
 
+    @staticmethod
+    def _model_tag(model: str) -> str:
+        """Sanitise a camera model string into a tag fragment.
+
+        Words that identify no particular device are dropped: gphoto2 labels
+        every USB-Mass-Storage mount "Mass Storage Camera", and baking that
+        into the destination would look like identity while providing none.
+
+        Args:
+            model: gphoto2 model string, e.g. "Nikon DSC D800E".
+
+        Returns:
+            e.g. "Nikon_DSC_D800E". Empty string when nothing distinctive
+            survives (e.g. "Mass Storage Camera") — callers must treat that
+            as "no identity available", not as a usable tag.
+        """
+        words = [w for w in re.split(r"[^A-Za-z0-9]+", model or "") if w]
+        kept = [w for w in words if w.upper() not in _GENERIC_MODEL_WORDS]
+        return "_".join(kept)
+
+    def _probe_serial(self, model: str, port: str) -> Optional[str]:
+        """Ask the camera for its serial number. None whenever that fails.
+
+        Deliberately total: most compacts, many DSLRs and every MSC mount
+        have no `serialnumber` config, and a camera that is busy answering a
+        transfer must not have the whole import fail over an optional tag
+        component. Every failure mode — binary missing, timeout, non-zero
+        exit, unparseable output, all-zero placeholder — degrades to None
+        and the caller falls back to a model-only identity.
+
+        Args:
+            model: gphoto2 model string.
+            port: gphoto2 port string.
+
+        Returns:
+            Sanitised serial with leading zero padding removed, or None.
+        """
+        env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+        try:
+            result = subprocess.run(
+                [
+                    "gphoto2",
+                    "--camera",
+                    model,
+                    "--port",
+                    port,
+                    "--get-config",
+                    "serialnumber",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self.SERIAL_TIMEOUT,
+                env=env,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            return None
+
+        if result.returncode != 0:
+            return None
+        match = _SERIAL_CURRENT_RE.search(result.stdout)
+        if not match:
+            return None
+        # Nikon pads to 32 hex chars with leading zeros; some bodies report
+        # nothing but zeros, which is a placeholder rather than an identity.
+        cleaned = re.sub(r"[^A-Za-z0-9]", "", match.group(1)).lstrip("0")
+        return cleaned[:32] or None
+
+    def _camera_identity(self, model: str, port: str) -> str:
+        """Stable per-device tag fragment for one camera.
+
+        Stability across runs is the whole point: the resume workflow copies
+        into the same destination again and relies on landing on the same
+        paths. So the identity is built only from things that survive an
+        unplug — the model and, when the body offers one, its serial. The
+        port is deliberately *not* used: gphoto2 reassigns `usb:002,004` on
+        every re-plug, which would scatter one camera across a new
+        subdirectory per session and re-download everything.
+
+        Call this once per camera, not once per folder — it may spawn a
+        gphoto2 subprocess.
+
+        Args:
+            model: gphoto2 model string.
+            port: gphoto2 port string (used to reach the camera, never as
+                part of the returned identity).
+
+        Returns:
+            e.g. "Nikon_DSC_D800E_sn_3001234", or "Nikon_DSC_D800E" when the
+            body reports no serial, or "" when neither is available.
+        """
+        parts = [p for p in (self._model_tag(model),) if p]
+        serial = self._probe_serial(model, port)
+        if serial:
+            parts.append(f"sn_{serial}")
+        return "_".join(parts)
+
     @classmethod
     def _folder_tag(cls, src_folder: str) -> str:
         """Turn a camera folder path into one filesystem-safe directory name.
@@ -231,9 +360,32 @@ class CameraTools:
         return tag or cls.ROOT_FOLDER_TAG
 
     @classmethod
-    def _folder_dest(cls, destination: Path, src_folder: str) -> Path:
+    def _camera_folder_tag(cls, identity: str, src_folder: str) -> str:
+        """Combine camera identity and source folder into one directory name.
+
+        The folder path alone is not unique across bodies:
+        `/store_00010001/DCIM/100NCD80` is what *every* Nikon of that
+        generation reports, so without the identity prefix two different
+        bodies imported into one destination — the documented resume
+        workflow, and the default `~/Pictures/import-<today>/` shared by
+        every import on the same day — would land on the same path.
+
+        Args:
+            identity: `_camera_identity` output; "" when unavailable.
+            src_folder: gphoto2 folder path.
+
+        Returns:
+            e.g. "Nikon_DSC_D800E_store_00010001_DCIM_100NCD80". Falls back
+            to the bare folder tag when `identity` is empty.
+        """
+        path_tag = cls._folder_tag(src_folder)
+        ident = _TAG_UNSAFE_RE.sub("_", identity).strip("_") if identity else ""
+        return f"{ident}_{path_tag}" if ident else path_tag
+
+    @classmethod
+    def _folder_dest(cls, destination: Path, src_folder: str, identity: str = "") -> Path:
         """Destination subdirectory that receives one camera folder's files."""
-        return destination / cls._folder_tag(src_folder)
+        return destination / cls._camera_folder_tag(identity, src_folder)
 
     def _download_one_folder(
         self,
@@ -244,16 +396,30 @@ class CameraTools:
         timeout_seconds: int,
         progress_log: Optional[TextIO] = None,
         expected_total: Optional[int] = None,
+        identity: Optional[str] = None,
     ) -> Tuple[int, int, List[str]]:
         """Run gphoto2 to copy all files in a single camera folder.
 
-        Files land in `<destination>/<folder tag>/`, never directly in
-        `destination`: `%f` is the bare basename, so a shared destination
-        would make `100NCD80/DSC_0001.NEF` and `101NCD80/DSC_0001.NEF`
-        collide and `--skip-existing` would silently drop the second one.
-        With one directory per source folder, `--skip-existing` can only
-        ever skip a re-run of the *same* file, which is what makes resumes
-        cheap and idempotent.
+        Files land in `<destination>/<identity>_<folder tag>/`, never
+        directly in `destination`: `%f` is the bare basename, so a shared
+        destination would make `100NCD80/DSC_0001.NEF` and
+        `101NCD80/DSC_0001.NEF` collide — and, because the folder path is
+        generic across bodies of the same generation, would do the same to
+        two different cameras imported into one destination.
+        `--skip-existing` would silently drop the newcomer in both cases.
+
+        What `--skip-existing` does and does not guarantee: gphoto2 compares
+        *nothing but the target path*. It never looks at size or content. So
+        a skip is safe exactly to the extent that the path is unique to one
+        photo, which is what the `<identity>_<folder tag>` directory buys.
+        The residual hole is two bodies of the same model that both report
+        no serial number: they share an identity, and if both hold a
+        `DSC_0001.NEF` in the same folder path the second one is skipped
+        with no error. Nothing on the PTP path can detect that — gphoto2
+        makes the decision inside its own process, and the post-flight
+        count sees a full destination. Import such bodies into separate
+        destinations. (The MSC path has no such hole; see
+        `_download_from_msc`, which never trusts a path alone.)
 
         Streams stdout via Popen + reader threads so per-file progress is
         written to `progress_log` as the transfer happens (the user can
@@ -275,6 +441,11 @@ class CameraTools:
             progress_log: open text file handle to receive timestamped
                 "Saving file as ..." lines. None to disable logging.
             expected_total: if known, formats progress as "(N/total)".
+            identity: camera identity from `_camera_identity`, computed once
+                per camera by the caller so the serial probe is not repeated
+                per folder. None means "derive it from `model` alone", which
+                is the safe fallback for direct callers — never a bare
+                folder tag with no camera in it.
 
         Returns:
             Tuple of (files_saved, files_skipped, error_lines).
@@ -284,7 +455,8 @@ class CameraTools:
                 process (gvfs etc.).
             subprocess.TimeoutExpired: caller handles partial transfers.
         """
-        folder_dest = self._folder_dest(destination, src_folder)
+        ident = identity if identity is not None else self._model_tag(model)
+        folder_dest = self._folder_dest(destination, src_folder, ident)
         folder_dest.mkdir(parents=True, exist_ok=True)
         if self._folder_tag(src_folder) == self.ROOT_FOLDER_TAG:
             filename_pattern = f"{folder_dest}/%F/%f.%C"
@@ -480,38 +652,173 @@ class CameraTools:
         return groups
 
     @classmethod
-    def _msc_folder_tag(cls, mount: Path, sub: Path) -> str:
+    def _msc_folder_tag(cls, mount: Path, sub: Path, model: str = "") -> str:
         """Destination subdirectory name for one DCIM folder on one card.
 
-        The card is part of the tag because two cards of the same body
+        The card label is part of the tag because two cards of the same body
         routinely carry the same folder name (`100NCD80`) holding different
-        photos with the same filenames.
+        photos with the same filenames. The model is prefixed too when it
+        adds anything: gphoto2 reports MSC mounts as "Mass Storage Camera",
+        which identifies nothing, and on a hybrid body the mount label
+        ("NIKON D800E") already repeats the model, so both cases are dropped
+        rather than doubled up.
+
+        A label is not a device identity — two cards formatted in the same
+        body carry the same one (`EOS_DIGITAL`), and a single-slot reader
+        gives them the same mount path as well. That collision is handled
+        where it actually matters, in `_download_from_msc`, which never
+        overwrites and never skips a file it cannot recognise.
 
         Args:
             mount: card mount point, e.g. /media/user/NIKON D800E.
             sub: the DCIM subfolder, e.g. <mount>/DCIM/100NCD80.
+            model: gphoto2 model string for this source, if known.
 
         Returns:
             Filesystem-safe directory name, e.g. "NIKON_D800E_100NCD80".
         """
-        parts = [p for p in (mount.name, sub.name) if p]
+        model_tag = cls._model_tag(model) if model else ""
+        if model_tag and cls._msc_matches_ptp(f"{_MSC_PORT_PREFIX}{mount}", model):
+            model_tag = ""  # the label already says the same thing
+        parts = [p for p in (model_tag, mount.name, sub.name) if p]
         return cls._folder_tag("/".join(parts)) if parts else cls.ROOT_FOLDER_TAG
+
+    @classmethod
+    def _edge_sample(cls, path: Path, size: int) -> bytes:
+        """Read the first and last `EDGE_SAMPLE_BYTES` of a file."""
+        n = cls.EDGE_SAMPLE_BYTES
+        with open(path, "rb") as handle:
+            head = handle.read(n)
+            if size <= 2 * n:
+                return head + handle.read()
+            handle.seek(-n, os.SEEK_END)
+            return head + handle.read(n)
+
+    @classmethod
+    def _looks_like_same_file(cls, src: Path, dst: Path) -> bool:
+        """Is `dst` plausibly the copy of `src` a previous run already made?
+
+        Equal size *and* equal first/last 8 KB. Deliberately not a hash:
+        hashing every 40 MB raw on a 2000-shot card means reading ~80 GB to
+        answer a question that is almost always "yes, same file", whereas
+        two reads of 8 KB cost the same regardless of file size. The edges
+        are where two different photos differ even when their sizes happen
+        to match — the EXIF timestamp and frame counter sit in the header,
+        and the last block of compressed image data is effectively random.
+
+        The tradeoff is one-sided by construction: this test accepts a
+        strict subset of what a size compare accepts, so it can only ever
+        make us copy something we did not have to. It cannot *prove* two
+        files are identical, so it is never used to authorise an overwrite —
+        only to authorise a skip, whose worst case is a redundant copy under
+        a `-2` name rather than a lost photo.
+
+        Args:
+            src: file on the card.
+            dst: candidate file already in the destination.
+
+        Returns:
+            True when the two match on size and both sampled edges. False on
+            any mismatch, and on any OSError — unreadable means unproven,
+            and unproven means "copy it".
+        """
+        try:
+            size = src.stat().st_size
+            if size != dst.stat().st_size:
+                return False
+            if size == 0:
+                return True
+            return cls._edge_sample(src, size) == cls._edge_sample(dst, size)
+        except OSError:
+            return False
+
+    @staticmethod
+    def _distinct_name(name: str, index: int) -> str:
+        """Insert a `-N` discriminator before the extension.
+
+        Args:
+            name: original filename, e.g. "IMG_0001.CR3".
+            index: discriminator, 2 for the first alternative.
+
+        Returns:
+            e.g. "IMG_0001-2.CR3". Deterministic, so a resumed run reuses
+            the same alternative name instead of inventing a new one.
+        """
+        stem, dot, ext = name.rpartition(".")
+        if not dot:
+            return f"{name}-{index}"
+        return f"{stem}-{index}{dot}{ext}"
+
+    def _msc_target_path(self, src: Path, sub_dest: Path) -> Optional[Path]:
+        """Decide where one card file may be written, or that it is present.
+
+        The one rule: never overwrite, and never skip, a file that is not
+        provably the file we already have. `shutil.copy2` onto an occupied
+        path destroys a photo that was already safely on disk — the exact
+        failure this whole module is written to prevent — and skipping on a
+        bare size match destroys it just as effectively by never copying it.
+
+        Args:
+            src: file on the card.
+            sub_dest: destination subdirectory for its source folder.
+
+        Returns:
+            A path to copy to — either `sub_dest/<name>` or a deterministic
+            `<stem>-N<ext>` alternative — or None when this exact file is
+            already in the destination and should be counted as a skip.
+
+        Raises:
+            OSError: `MAX_DISTINCT_SUFFIX` alternatives are all taken by
+                other files. Reported per-file by the caller; still no
+                overwrite.
+        """
+        dst = sub_dest / src.name
+        if not dst.exists():
+            return dst
+        if self._looks_like_same_file(src, dst):
+            return None
+        for index in range(2, self.MAX_DISTINCT_SUFFIX + 1):
+            candidate = sub_dest / self._distinct_name(src.name, index)
+            if not candidate.exists():
+                return candidate
+            # A previous run already parked this same file here: skipping
+            # keeps the resume idempotent instead of growing a -3, -4, ...
+            if self._looks_like_same_file(src, candidate):
+                return None
+        raise OSError(
+            f"{self.MAX_DISTINCT_SUFFIX} differing files already occupy the "
+            f"{src.name} name in {sub_dest}; refusing to overwrite any of them"
+        )
 
     def _download_from_msc(
         self,
         mount: Path,
         destination: Path,
         timeout_seconds: int = DOWNLOAD_TIMEOUT_DEFAULT,
+        model: str = "",
     ) -> Tuple[int, int, List[str]]:
         """Copy DCIM-shaped files from a USB Mass-Storage card mount.
 
         Walks `<mount>/DCIM/<subdir>/` for image and video files and copies
-        each into `<destination>/<card>_<subdir>/`. Keeping one directory
-        per source folder is what makes the skip test safe: same-name +
-        same-size is only treated as "already copied" when both files come
-        from the same folder on the same card. Flattening made two
-        genuinely different photos that shared a name and a byte size
-        indistinguishable, and the second one was dropped without an error.
+        each into `<destination>/<card>_<subdir>/`. One directory per source
+        folder keeps files from different folders and different cards apart,
+        but a card label is not a device identity — two cards formatted in
+        the same body are both `EOS_DIGITAL`, and a single-slot reader
+        mounts them at the same path — so the directory is never trusted on
+        its own. Every write goes through `_msc_target_path`, which:
+
+        - copies when nothing is in the way;
+        - skips, counting a skip, when the destination file still looks like
+          the same file (size plus both 8 KB edges), which is the resume
+          case;
+        - and otherwise writes the newcomer under a deterministic
+          `IMG_0001-2.CR3` name and reports it with `RENAMED_PREFIX`, so the
+          user ends up holding both photos.
+
+        `shutil.copy2` is therefore never aimed at an occupied path. The
+        earlier "exists and same size ⇒ skip, else overwrite" pair lost a
+        photo either way: the skip branch never copied the newcomer, and the
+        overwrite branch destroyed a file already safely on disk.
 
         `timeout_seconds` is an overall budget for the whole walk, checked
         between files. A flaky reader cannot stall the import for an hour
@@ -522,9 +829,13 @@ class CameraTools:
             mount: card mount point.
             destination: import root.
             timeout_seconds: overall budget for this card, in seconds.
+            model: gphoto2 model string for this source, if known. Folded
+                into the destination tag when it adds identity.
 
         Returns:
-            Tuple of (files_saved, files_skipped, error_messages).
+            Tuple of (files_saved, files_skipped, messages). Messages hold
+            real errors and `RENAMED_PREFIX` notices; a notice means both
+            files were kept, not that anything failed.
         """
         deadline = time.monotonic() + timeout_seconds
         destination.mkdir(parents=True, exist_ok=True)
@@ -537,7 +848,7 @@ class CameraTools:
         images: List[Tuple[Path, Path]] = []
         for sub in sorted(dcim.iterdir()):
             if sub.is_dir():
-                sub_dest = destination / self._msc_folder_tag(mount, sub)
+                sub_dest = destination / self._msc_folder_tag(mount, sub, model)
                 for entry in sorted(sub.iterdir()):
                     if entry.is_file() and not entry.name.startswith("."):
                         images.append((entry, sub_dest))
@@ -570,16 +881,24 @@ class CameraTools:
                     log.write(f"!! {msg}\n")
                     log.flush()
                     break
-                dst = sub_dest / src.name
                 try:
-                    if dst.exists() and dst.stat().st_size == src.stat().st_size:
+                    sub_dest.mkdir(parents=True, exist_ok=True)
+                    dst = self._msc_target_path(src, sub_dest)
+                    if dst is None:
                         skipped += 1
                         continue
-                    sub_dest.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dst)
                     saved += 1
                     ts = datetime.now().strftime("%H:%M:%S")
-                    log.write(f"[{ts}] ({saved}/{expected}) {sub_dest.name}/{src.name}\n")
+                    log.write(f"[{ts}] ({saved}/{expected}) {sub_dest.name}/{dst.name}\n")
+                    if dst.name != src.name:
+                        note = (
+                            f"{self.RENAMED_PREFIX} {sub_dest.name}/{src.name} is a "
+                            f"different file from the one already in the destination; "
+                            f"both kept, the new one as {dst.name}"
+                        )
+                        errors.append(note)
+                        log.write(f"** {note}\n")
                     log.flush()
                 except OSError as exc:
                     errors.append(f"{src.name}: {exc}")
@@ -604,10 +923,13 @@ class CameraTools:
     ) -> Tuple[int, int, List[str]]:
         """Copy all files from a camera, walking each storage folder.
 
-        - Pre-flight: enumerate leaf folders + count expected files per folder.
-        - Each folder is written to its own `<dest>/<folder tag>/`
-          subdirectory, so same-named files from different folders or
-          different cards cannot overwrite or "skip-existing" each other.
+        - Pre-flight: resolve this camera's identity once (one gphoto2 call
+          at most, never one per folder), enumerate leaf folders + count
+          expected files per folder.
+        - Each folder is written to its own
+          `<dest>/<camera identity>_<folder tag>/` subdirectory, so
+          same-named files from different folders, different cards or
+          different bodies cannot overwrite or "skip-existing" each other.
         - During transfer: stream per-file progress to <dest>/.import.log
           so the user can `tail -f` it.
         - `timeout_seconds` is an overall budget for this camera, not a
@@ -618,7 +940,12 @@ class CameraTools:
         - Lock errors raised before any progress propagate so the user
           sees the gvfs-style hint instead of a vague partial result.
         - Post-flight: validate disk file count vs expected; surface a
-          shortfall warning so silent under-copies are visible.
+          shortfall warning so silent under-copies are visible. It counts
+          the identity-prefixed directories this camera actually wrote to,
+          so it stays honest when another body imported into the same
+          destination. It cannot see a `--skip-existing` drop between two
+          same-model bodies with no serial number, because such a drop
+          leaves a full destination — see `_download_one_folder`.
 
         Args:
             model: gphoto2 model string (e.g. "Nikon DSC D800E").
@@ -646,11 +973,16 @@ class CameraTools:
         # PTP+MSC pairs uniformly via this single entry point.
         if self._is_msc_port(port):
             return self._download_from_msc(
-                self._msc_mount(port), destination, timeout_seconds
+                self._msc_mount(port), destination, timeout_seconds, model=model
             )
 
         deadline = time.monotonic() + timeout_seconds
         destination.mkdir(parents=True, exist_ok=True)
+
+        # Resolved once for the whole camera: the serial probe is a gphoto2
+        # round-trip, and re-asking per folder would both cost time and risk
+        # a folder landing under a different tag if one probe fails.
+        identity = self._camera_identity(model, port)
 
         folders = self._list_image_folders(model, port)
 
@@ -678,6 +1010,7 @@ class CameraTools:
                 f"{datetime.now().isoformat(timespec='seconds')} ===\n"
             )
             log.write(f"Camera: {model} ({port})\n")
+            log.write(f"Camera identity tag: {identity or '(none available)'}\n")
             log.write(f"Destination: {destination}\n")
             log.write(
                 f"Folders: {len(folders)}; expected files: "
@@ -715,6 +1048,7 @@ class CameraTools:
                         remaining,
                         progress_log=log,
                         expected_total=expected_total or None,
+                        identity=identity,
                     )
                 except DarktableMCPError as exc:
                     if total_count == 0 and not all_errors:
@@ -746,7 +1080,9 @@ class CameraTools:
             # Count only the folders belonging to this camera, so files put
             # here by another card in the same import don't mask a shortfall.
             disk_count = sum(
-                self._count_files_on_disk(self._folder_dest(destination, folder))
+                self._count_files_on_disk(
+                    self._folder_dest(destination, folder, identity)
+                )
                 for folder in folders
             )
             if expected_total and disk_count < expected_total:
@@ -776,9 +1112,17 @@ class CameraTools:
         Detects connected cameras via gphoto2 (libgphoto2 — same library
         darktable's GUI camera-import uses) and copies all files to a
         destination directory. Each camera folder / card folder lands in
-        its own subdirectory, `<destination>/<folder tag>/<filename>`,
-        because camera filenames are only unique within one folder and
-        flattening them silently dropped duplicates. Per-file progress is
+        its own subdirectory,
+        `<destination>/<camera identity>_<folder tag>/<filename>`, because
+        camera filenames are only unique within one folder on one body and
+        flattening them silently dropped duplicates. The identity is the
+        camera model plus its serial number when it reports one; two bodies
+        of the same model that report no serial share a subdirectory, and
+        on the PTP path that is the one case where a same-named photo can
+        still be dropped without an error — import such bodies into separate
+        destinations. The USB-Mass-Storage path keeps both regardless: it
+        never overwrites and never skips a file it cannot recognise, writing
+        the newcomer as `IMG_0001-2.CR3` and saying so. Per-file progress is
         streamed to a log file inside the destination so long imports can
         be monitored with `tail -f`. Registering the directory with
         darktable's library is left to the user (open darktable, click
@@ -895,7 +1239,12 @@ class CameraTools:
         sources = ", ".join(f"{c['model']} ({c['port']})" for c in target_group)
 
         shortfalls = [e for e in all_errors if e.startswith(self.SHORTFALL_PREFIX)]
-        other_errors = [e for e in all_errors if not e.startswith(self.SHORTFALL_PREFIX)]
+        renames = [e for e in all_errors if e.startswith(self.RENAMED_PREFIX)]
+        other_errors = [
+            e
+            for e in all_errors
+            if not e.startswith((self.SHORTFALL_PREFIX, self.RENAMED_PREFIX))
+        ]
 
         summary_parts = [
             f"Copied {total_count} new file(s) from {sources}",
@@ -917,6 +1266,19 @@ class CameraTools:
                 "   Do NOT format the card. Re-run this tool to fetch the "
                 "missing files (already-copied files are skipped)."
             )
+        if renames:
+            # Not a failure — both photos are on disk — but the user has to
+            # know that some files are not under the name the camera gave
+            # them, or they will go looking for a photo they think is lost.
+            summary_parts.append("")
+            summary_parts.append(
+                f"Kept both copies for {len(renames)} name conflict(s) — a file "
+                "already in the destination had the same name but different "
+                "content, so nothing was overwritten:"
+            )
+            summary_parts.extend(f"     {msg}" for msg in renames[:5])
+            if len(renames) > 5:
+                summary_parts.append(f"     ... and {len(renames) - 5} more (see the log)")
         if other_errors:
             summary_parts.append(
                 f"Warning: {len(other_errors)} issue(s). First: {other_errors[0]}"

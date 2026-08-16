@@ -18,15 +18,18 @@ client; this server drives darktable.
 
 - `import_from_camera(destination?, camera_port?, timeout_seconds?)` — Detect a camera via libgphoto2 and copy photos to a local directory. Auto-merges hybrid setups (one card on PTP, the other mounted as USB Mass-Storage) into a single import — Nikon DSLRs in particular show up that way and the previous behavior silently halved the import.
 
-  Files land **one subdirectory per camera folder or card**, never flat:
+  Files land **one subdirectory per camera folder or card, prefixed with the camera's identity** — never flat:
 
   ```
-  <destination>/store_00010001_DCIM_100NCD80/DSC_0001.NEF
-  <destination>/store_00020001_DCIM_100NCD80/DSC_0001.NEF   # same name, different photo
+  <destination>/Nikon_D850_sn_30014567_store_00010001_DCIM_100NCD80/DSC_0001.NEF
+  <destination>/Nikon_D850_sn_30014567_store_00020001_DCIM_100NCD80/DSC_0001.NEF   # same name, different photo
+  <destination>/Canon_EOS_R6_EOS_DIGITAL_100EOSR6/IMG_0001.CR3
   <destination>/.import.log
   ```
 
-  Camera filenames repeat across folders and across the two cards of a dual-slot body. The old flat layout combined with `--skip-existing` silently dropped those duplicates. Import the destination recursively.
+  Camera filenames repeat across folders, across the two cards of a dual-slot body, and across *bodies* importing into the same destination — and the default destination `~/Pictures/import-YYYY-MM-DD/` is shared by every import on the same day. The old flat layout combined with `--skip-existing` silently dropped those duplicates. Import the destination recursively.
+
+  The serial number is read once per camera via `gphoto2 --get-config serialnumber` and omitted when the camera doesn't report one. On the card-copy path a file that would collide with a *different* photo already on disk is written alongside it as `IMG_0001-2.CR3` and reported — never overwritten; sameness is judged on size plus the first and last 8 KB, and is only ever used to authorise a skip. **Known limit:** two bodies of the same model that report no serial cannot be distinguished, so give those separate destinations.
 
   `timeout_seconds` is an **overall budget for one camera**, shared across all its folders — not a per-folder timeout. Skipped files are counted and reported, and a post-flight shortfall (fewer files on disk than the camera said it held) is surfaced as a prominent `!! INCOMPLETE IMPORT` block, because that is the moment before someone formats the card.
 

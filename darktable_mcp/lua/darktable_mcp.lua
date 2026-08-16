@@ -49,33 +49,77 @@ end
 -- and cannot loop: neither `find` nor the lfs walk follows symlinked dirs.
 local IMPORT_MAX_DEPTH = 8
 
+-- Mode of `path` without following a symlink, so a symlinked directory is
+-- skipped rather than descended into (that is what could loop). Returns nil
+-- when the filesystem module cannot answer at all.
+local function _link_mode(fs, path)
+  local stat = fs.symlinkattributes or fs.attributes
+  if type(stat) ~= "function" then return nil end
+  local ok, mode = pcall(stat, path, "mode")
+  if not ok then return nil end
+  return mode
+end
+
+-- Walk `dir` with a LuaFileSystem-shaped module, appending it and every
+-- subdirectory to `out`.
+--
+-- Returns TRUE only if every directory it touched was actually read. This
+-- distinction is the whole point: the previous version appended `dir` to `out`
+-- as its very first statement and wrapped the listing in a bare `pcall` whose
+-- result it discarded, so a root that does not exist (or cannot be read)
+-- produced a one-element `out` that was indistinguishable from a real, empty
+-- leaf directory. list_directories_recursive's `#out == 0` failure check was
+-- therefore unreachable whenever lfs was present, and import_batch answered
+-- `recursive_honoured = true, directories_imported = 1` for a path it had
+-- never managed to look at.
 local _walk_lfs
-_walk_lfs = function(dir, out, depth)
+_walk_lfs = function(fs, dir, out, depth)
+  -- Stat the root BEFORE claiming it. lfs.dir() raises on a missing path, but
+  -- some stand-ins simply yield nothing, so check both: an explicit stat when
+  -- the module offers one, and the listing itself failing.
+  local stat = fs.attributes or fs.symlinkattributes
+  if type(stat) == "function" then
+    local ok, mode = pcall(stat, dir, "mode")
+    if not ok or mode ~= "directory" then return false end
+  end
+
   out[#out + 1] = dir
-  if depth >= IMPORT_MAX_DEPTH then return end
-  pcall(function()
-    for entry in lfs.dir(dir) do
-      if entry ~= "." and entry ~= ".." then
-        local child = dir .. "/" .. entry
-        -- lfs.attributes (not symlinkAttributes) would follow symlinks and
-        -- could loop; use the link's own mode so a symlinked directory is
-        -- skipped rather than descended into.
-        local mode = lfs.symlinkattributes and lfs.symlinkattributes(child, "mode")
-                     or lfs.attributes(child, "mode")
-        if mode == "directory" then _walk_lfs(child, out, depth + 1) end
-      end
+  if depth >= IMPORT_MAX_DEPTH then return true end
+
+  local entries = {}
+  local listed = pcall(function()
+    for entry in fs.dir(dir) do
+      if entry ~= "." and entry ~= ".." then entries[#entries + 1] = entry end
     end
   end)
+  if not listed then return false end
+
+  -- A subdirectory we could not read means the tree we return is a subset of
+  -- the real one, so propagate that upward instead of silently truncating.
+  local complete = true
+  for _, entry in ipairs(entries) do
+    local child = dir .. "/" .. entry
+    if _link_mode(fs, child) == "directory" then
+      if not _walk_lfs(fs, child, out, depth + 1) then complete = false end
+    end
+  end
+  return complete
 end
 
 -- Return `dir` plus every subdirectory beneath it, and whether the
--- enumeration actually succeeded. `false` means we could not read the tree
--- and the single-element result is a guess, NOT a proven leaf directory --
--- callers must not claim recursion was honoured in that case.
-local function list_directories_recursive(dir)
-  local out = {}
-  if lfs_available then
-    _walk_lfs(dir, out, 0)
+-- enumeration actually succeeded. `false` means we could not read the whole
+-- tree, so the result is a guess or a subset -- callers must not claim
+-- recursion was honoured in that case.
+--
+-- `fs` is an injection point for the tests: pass a LuaFileSystem-shaped table
+-- to exercise the lfs branch on a host (like CI's plain lua5.4) that has no
+-- real lfs. Production callers pass nothing and get the real module or the
+-- `find` fallback.
+local function list_directories_recursive(dir, fs)
+  fs = fs or (lfs_available and lfs or nil)
+  local out, ok = {}, false
+  if fs then
+    ok = _walk_lfs(fs, dir, out, 0)
   else
     -- `find` does not follow symlinks without -L, so this cannot loop.
     local p = io.popen("find " .. shell_quote(dir)
@@ -84,10 +128,13 @@ local function list_directories_recursive(dir)
       for line in p:lines() do out[#out + 1] = line end
       p:close()
     end
+    -- `find` prints nothing (and exits non-zero) for a path it cannot stat,
+    -- so an empty listing IS the failure signal here.
+    ok = #out > 0
   end
-  if #out == 0 then return {dir}, false end
+  if #out == 0 then out = {dir} end
   table.sort(out)   -- parents before children; deterministic import order
-  return out, true
+  return out, ok
 end
 
 -- ---- JSON encode/decode (minimal, MVP-only) --------------------------------
@@ -315,21 +362,40 @@ local methods = {}
 -- import_batch's post-import poll budget.
 --
 -- This poll runs INSIDE the worker loop and blocks every other bridge request
--- for its duration, so it is hard-capped: 100 x 100ms = 10s worst case. It
--- normally exits far earlier, as soon as the count stops growing.
+-- for its duration. It normally exits far earlier, as soon as the count stops
+-- growing.
 --
 -- The old ceiling was 3s, which the per-subdirectory camera layout now
 -- routinely outruns: import_from_camera writes one directory per camera
 -- folder/card, so a single card import can register several hundred files
 -- across many film rolls and darktable's background scan takes longer than
 -- 3s to register them all. The Python client budgets 120s for import_batch
--- (DEFAULT_TIMEOUTS in darktable_mcp/bridge/client.py), so 10s is affordable.
+-- (DEFAULT_TIMEOUTS in darktable_mcp/bridge/client.py), so ~10s is affordable.
+--
+-- THREE independent bounds, because the attempt count alone is not a time
+-- budget. Each attempt runs count_images_under, a full linear scan of
+-- dt.database (there is no index to query -- see the note above view_photos),
+-- so on a 30k-image library the scans, not the sleeps, dominate. The old
+-- "100 x 100ms = 10s worst case" comment counted only the sleeping and was
+-- wrong by however long 100 full library scans take -- potentially minutes of
+-- head-of-line blocking, past the client's own 120s budget.
+--   * IMPORT_POLL_ATTEMPTS      -- ceiling on scans, so the work is bounded.
+--   * IMPORT_POLL_DEADLINE_SECONDS -- real wall clock, so slow scans cannot
+--     push the total past it however few attempts they represent.
+--   * IMPORT_ZERO_GRACE_POLLS   -- bail out early when NOTHING has appeared.
 local IMPORT_POLL_ATTEMPTS = 100
 local IMPORT_POLL_INTERVAL_MS = 100
+-- Wall-clock ceiling on the whole poll, sleeps AND scans included.
+local IMPORT_POLL_DEADLINE_SECONDS = 10
 -- Consecutive polls showing no growth before the count is called final.
 -- Without this the poll stopped at the FIRST non-zero count, which under-
 -- reports a trickling multi-directory import.
 local IMPORT_SETTLE_POLLS = 5
+-- Attempts to allow before giving up on a count that is still exactly zero.
+-- Zero after ~2s is the "bad path / darktable rejected the folder" case, and
+-- 80 more full library scans will not rescue it -- they only make the caller
+-- wait. Anything that HAS started arriving keeps the full settle behaviour.
+local IMPORT_ZERO_GRACE_POLLS = 20
 
 -- darktable's image.path is the parent directory; image.filename is the
 -- bare basename. Callers want a single absolute file path they can hand
@@ -439,13 +505,19 @@ end
 --
 -- WARNING: this BLOCKS the worker loop. dt.control.sleep yields to darktable,
 -- not to our own scan_dir, so no other bridge request is served while it
--- runs -- worst case IMPORT_POLL_ATTEMPTS * IMPORT_POLL_INTERVAL_MS (10s) of
--- head-of-line blocking. The bridge is one-request-at-a-time by design (see
--- the IPC bridge MVP spec), so this is tolerated, but do not add more
--- in-worker polling loops.
-local function poll_for_imported(source_path)
+-- runs. The bound is IMPORT_POLL_DEADLINE_SECONDS (10s) of wall clock, which
+-- covers the library scans as well as the sleeps -- an attempt-count-only
+-- bound does not, because each attempt is a full O(n) pass over dt.database.
+-- The bridge is one-request-at-a-time by design (see the IPC bridge MVP
+-- spec), so this is tolerated, but do not add more in-worker polling loops.
+--
+-- `deps.now` overrides the clock; the tests use it to prove the wall-clock
+-- deadline fires without actually waiting 10 seconds.
+local function poll_for_imported(source_path, deps)
+  local now = (deps and deps.now) or os.time
+  local started = now()
   local count, stable = 0, 0
-  for _ = 1, IMPORT_POLL_ATTEMPTS do
+  for attempt = 1, IMPORT_POLL_ATTEMPTS do
     local seen = count_images_under(source_path)
     if seen > count then
       -- Still arriving: reset the settle window rather than returning the
@@ -457,6 +529,18 @@ local function poll_for_imported(source_path)
       if stable >= IMPORT_SETTLE_POLLS then
         return count, false     -- settled; this count is final
       end
+    end
+    -- Nothing has appeared at all after the grace window: this is the bad
+    -- path / rejected-folder case, not a slow trickle. Return promptly with
+    -- scan_incomplete rather than burning the rest of the budget on scans
+    -- that have nothing to find.
+    if count == 0 and attempt >= IMPORT_ZERO_GRACE_POLLS then
+      return 0, true
+    end
+    -- Deadline check BEFORE the sleep, so a run whose scans alone have eaten
+    -- the budget stops here instead of paying for one more of them.
+    if now() - started >= IMPORT_POLL_DEADLINE_SECONDS then
+      return count, true
     end
     if dt.control and dt.control.sleep then
       dt.control.sleep(IMPORT_POLL_INTERVAL_MS)
@@ -537,10 +621,14 @@ methods.import_batch = function(p)
   local recursive_honoured = recursive and enumerated
   local note = nil
   if recursive and not enumerated then
+    -- #dirs, not "only that path": the walk may have read part of the tree
+    -- before hitting an unreadable subdirectory, and those directories WERE
+    -- imported. Saying "only that path" would be a second false claim.
     note = "recursive=true requested, but " .. source_path .. " could not be "
-        .. "enumerated, so only that path was imported. Any subdirectories "
-        .. "were registered only if darktable's own recursive-import "
-        .. "preference is enabled."
+        .. "fully enumerated -- " .. #dirs .. " director"
+        .. (#dirs == 1 and "y was" or "ies were") .. " imported. Any "
+        .. "subdirectory not listed was registered only if darktable's own "
+        .. "recursive-import preference is enabled."
   elseif not recursive then
     note = "recursive=false could not be enforced: darktable's Lua API has no "
         .. "per-call recursion flag, and this plugin does not modify your "
@@ -852,7 +940,22 @@ end
 -- backoff a tick is 100ms..1000ms, so 100 ticks would drift anywhere from 10s
 -- to 100s. Elapsed time keeps the cadence honest whatever the poll tier.
 local SWEEP_INTERVAL_SECONDS = 10
-local STALE_AGE_SECONDS = 60
+
+-- INVARIANT: STALE_AGE_SECONDS must stay comfortably GREATER than the largest
+-- per-method client budget in DEFAULT_TIMEOUTS (darktable_mcp/bridge/client.py
+-- -- currently 120s for import_batch and apply_preset). Change either number
+-- and you must re-check the other; tests/test_lua_dispatcher.py asserts the
+-- relation across the two languages.
+--
+-- The sweep exists to collect files whose owner is GONE. A request whose
+-- caller is still waiting is not abandoned, and the worker is single-threaded:
+-- while it serves one 120s-budget call, later requests sit queued in the cache
+-- directory doing nothing wrong. At the old 60s the sweep deleted those queued
+-- request-*.json files out from under live callers, who then waited out their
+-- full 120s and were told "darktable is not running" -- a bug the sweep itself
+-- manufactured. 300s clears the largest budget with margin for the queueing
+-- delay ahead of it.
+local STALE_AGE_SECONDS = 300
 
 local function worker_loop()
   local dir = cache_dir()
@@ -904,6 +1007,8 @@ return {
     attempts = IMPORT_POLL_ATTEMPTS,
     interval_ms = IMPORT_POLL_INTERVAL_MS,
     settle_polls = IMPORT_SETTLE_POLLS,
+    deadline_seconds = IMPORT_POLL_DEADLINE_SECONDS,
+    zero_grace_polls = IMPORT_ZERO_GRACE_POLLS,
     max_depth = IMPORT_MAX_DEPTH,
   },
   cache_dir = cache_dir,

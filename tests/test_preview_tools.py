@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from darktable_mcp.tools import preview_tools
 from darktable_mcp.tools.preview_tools import (
     XMP_TEMPLATE,
     apply_ratings_batch,
@@ -252,14 +253,72 @@ class TestExistingSidecarIsNotClobbered:
 
     def test_existing_sidecar_keeps_its_permissions(self, tmp_path: Path) -> None:
         # The atomic replace must not tighten a world-readable sidecar to 0600.
+        # This path reads the mode off the old file, so it never needs a umask.
         _touch(tmp_path / "DSC_0107.NEF")
         sidecar = tmp_path / "DSC_0107.NEF.xmp"
         sidecar.write_text(DARKTABLE_SIDECAR)
         sidecar.chmod(0o644)
 
-        apply_ratings_batch(tmp_path, {"DSC_0107": 5}, log=False)
+        result = apply_ratings_batch(tmp_path, {"DSC_0107": 5}, log=False)
 
+        assert result["items"][0]["action"] == "updated"  # patched in place, not recreated
         assert sidecar.stat().st_mode & 0o777 == 0o644
+
+    def test_existing_sidecar_keeps_a_tight_mode_too(self, tmp_path: Path) -> None:
+        # Preservation cuts both ways: a deliberately private sidecar must not
+        # be loosened to the new-file mode by a rating patch.
+        _touch(tmp_path / "DSC_0110.NEF")
+        sidecar = tmp_path / "DSC_0110.NEF.xmp"
+        sidecar.write_text(DARKTABLE_SIDECAR)
+        sidecar.chmod(0o600)
+
+        apply_ratings_batch(tmp_path, {"DSC_0110": 1}, log=False)
+
+        assert sidecar.stat().st_mode & 0o777 == 0o600
+
+    def test_new_sidecar_mode_follows_the_import_time_umask(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # A newly created sidecar gets what the umask implies (0644 under 022),
+        # not mkstemp's 0600. The value is the one sampled at import, so the
+        # 0o077 set here mid-flight is deliberately not picked up — that is the
+        # price of never blanking the process-global umask while threads run.
+        monkeypatch.setattr(preview_tools, "_NEW_FILE_MODE", 0o666 & ~0o022)
+        _touch(tmp_path / "DSC_0108.NEF")
+        previous = os.umask(0o077)
+        try:
+            result = apply_ratings_batch(tmp_path, {"DSC_0108": 4}, log=False)
+        finally:
+            os.umask(previous)
+
+        assert result["items"][0]["action"] == "created"
+        assert (tmp_path / "DSC_0108.NEF.xmp").stat().st_mode & 0o777 == 0o644
+
+    def test_new_file_mode_is_derived_from_the_process_umask(self) -> None:
+        # Nothing in the test run changes the umask permanently, so the value
+        # sampled at import must still match the live one.
+        current = os.umask(0)
+        os.umask(current)
+
+        assert preview_tools._NEW_FILE_MODE == 0o666 & ~current
+
+    def test_writing_never_touches_the_process_umask(self, tmp_path: Path, monkeypatch) -> None:
+        # This is what makes the race impossible: probing the umask blanks it
+        # process-wide, so a concurrent thread's mkdir would go world-writable.
+        calls: list[int] = []
+        real_umask = os.umask
+
+        def _recording_umask(mask: int) -> int:
+            calls.append(mask)
+            return real_umask(mask)
+
+        _touch(tmp_path / "DSC_0109.NEF")
+        monkeypatch.setattr(os, "umask", _recording_umask)
+
+        result = apply_ratings_batch(tmp_path, {"DSC_0109": 2}, log=False)
+
+        assert result["applied"] == 1
+        assert calls == []
 
     def test_no_temp_files_left_behind(self, tmp_path: Path) -> None:
         _touch(tmp_path / "DSC_0106.NEF")

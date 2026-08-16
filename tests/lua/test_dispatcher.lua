@@ -716,7 +716,25 @@ do
 
   -- Sweep cadence is now time-based, so it cannot drift with the poll tier.
   assertEq(internals.sweep_interval_seconds, 10, "sweep every 10 elapsed seconds")
-  assertEq(internals.stale_age_seconds, 60, "files older than 60s are stale")
+
+  -- The stale age must outlast the LONGEST client budget in DEFAULT_TIMEOUTS
+  -- (darktable_mcp/bridge/client.py: 120s for import_batch and apply_preset).
+  -- The worker is single-threaded, so a request can sit queued behind a call
+  -- that legitimately runs for its full budget. At the old 60s the sweep
+  -- deleted those still-wanted request-*.json files, and their callers waited
+  -- out the whole 120s only to be told "darktable is not running".
+  local MAX_CLIENT_TIMEOUT = 120
+  assertTrue(internals.stale_age_seconds > MAX_CLIENT_TIMEOUT,
+    "stale age (" .. tostring(internals.stale_age_seconds) .. "s) must exceed "
+    .. "the largest client timeout (" .. MAX_CLIENT_TIMEOUT .. "s), or the "
+    .. "sweep deletes requests whose callers are still waiting")
+  assertTrue(internals.stale_age_seconds >= 300,
+    "stale age leaves margin for queueing delay ahead of the longest call")
+  -- find's -mmin granularity is whole minutes; the age must survive the
+  -- floor() in sweep_stale with the invariant intact.
+  assertTrue(math.floor(internals.stale_age_seconds / 60) * 60 > MAX_CLIENT_TIMEOUT,
+    "stale age still exceeds the client timeout after sweep_stale rounds it "
+    .. "down to whole minutes for find -mmin")
 end
 
 -- ---- scan_dir returns a handled count (drives the backoff) -----------------
@@ -901,6 +919,134 @@ do
   rmtree(root)
 end
 
+-- ---- list_directories_recursive: the LFS branch ----------------------------
+-- The block above only ever exercises the `find` fallback, because CI runs a
+-- plain lua with no LuaFileSystem. That left the lfs branch untested, and it
+-- was broken in exactly the way the fallback is not: _walk_lfs appended the
+-- root unconditionally and threw away the result of its own pcall, so on a
+-- darktable whose Lua HAS lfs, import_batch{source_path="/does/not/exist"}
+-- answered recursive_honoured = true, directories_imported = 1, note = nil.
+-- Inject a stand-in module so both branches are covered on every host.
+do
+  -- os.execute's return shape differs across 5.1/5.2+; accept both.
+  local function shell_ok(cmd)
+    local a, _, c = os.execute(cmd)
+    return a == true or a == 0 or (a ~= false and c == 0)
+  end
+  local function mode_of(path, follow)
+    if not follow and shell_ok("test -L " .. sq(path)) then return "link" end
+    if shell_ok("test -d " .. sq(path)) then return "directory" end
+    if shell_ok("test -e " .. sq(path)) then return "file" end
+    return nil
+  end
+
+  -- A LuaFileSystem stand-in over the real filesystem. Crucially, dir() RAISES
+  -- on an unreadable path, like the real lfs.dir does.
+  local fake_lfs = {
+    attributes = function(path, what)
+      if what ~= "mode" then return nil end
+      return mode_of(path, true)
+    end,
+    symlinkattributes = function(path, what)
+      if what ~= "mode" then return nil end
+      return mode_of(path, false)
+    end,
+    dir = function(d)
+      if not shell_ok("test -d " .. sq(d)) then
+        error("cannot open " .. d .. ": No such file or directory")
+      end
+      local p = io.popen("ls -1a " .. sq(d) .. " 2>/dev/null")
+      local lines = {}
+      for line in p:lines() do lines[#lines + 1] = line end
+      p:close()
+      local i = 0
+      return function() i = i + 1; return lines[i] end
+    end,
+  }
+
+  local root = make_tmpdir([[dtmcp-lfs-tree it's "a" $(echo x)]])
+  os.execute("mkdir -p " .. sq(root .. "/store_00010001_DCIM_100NCD80"))
+  os.execute("mkdir -p " .. sq(root .. "/store_00020001_DCIM_100NCD80/nested"))
+  write_text(root .. "/store_00010001_DCIM_100NCD80/DSC_0001.NEF", "x")
+
+  local dirs, enumerated = internals.list_directories_recursive(root, fake_lfs)
+  assertEq(enumerated, true, "lfs walk reports success for a real directory")
+  assertEq(#dirs, 4, "lfs walk returns the root plus its three subdirectories")
+  assertEq(dirs[1], root, "lfs walk sorts the root first")
+  local set = {}
+  for _, d in ipairs(dirs) do set[d] = true end
+  assertTrue(set[root .. "/store_00020001_DCIM_100NCD80/nested"],
+    "lfs walk descends into nested directories")
+  assertTrue(not set[root .. "/store_00010001_DCIM_100NCD80/DSC_0001.NEF"],
+    "lfs walk lists directories only, not files")
+
+  -- THE REGRESSION. A root that does not exist must NOT come back as a
+  -- confident single-element answer, or import_batch claims it honoured
+  -- recursion over a tree it never opened.
+  local missing, ok_missing =
+    internals.list_directories_recursive(root .. "/does-not-exist", fake_lfs)
+  assertEq(ok_missing, false, "lfs walk reports failure for a nonexistent root")
+  assertEq(#missing, 1, "failed lfs walk still yields the requested path")
+  assertEq(missing[1], root .. "/does-not-exist",
+    "failed lfs walk echoes the path it was asked about")
+
+  -- A real but genuinely EMPTY directory is the case the failure signal must
+  -- not be confused with: read fine, no children, so enumeration succeeded.
+  local empty = root .. "/empty-but-real"
+  os.execute("mkdir -p " .. sq(empty))
+  local edirs, eok = internals.list_directories_recursive(empty, fake_lfs)
+  assertEq(eok, true, "an empty but READABLE directory enumerates successfully")
+  assertEq(#edirs, 1, "an empty directory yields just itself")
+
+  -- A module with no attributes()/symlinkattributes() at all: the only signal
+  -- is dir() raising, and that must still be propagated.
+  local minimal_lfs = {dir = fake_lfs.dir}
+  local _, ok_min =
+    internals.list_directories_recursive(root .. "/nope", minimal_lfs)
+  assertEq(ok_min, false,
+    "a raising dir() alone is enough to report enumeration failure")
+  local _, ok_min_real = internals.list_directories_recursive(empty, minimal_lfs)
+  assertEq(ok_min_real, true, "the same minimal module still succeeds on a real path")
+
+  rmtree(root)
+end
+
+-- ---- list_directories_recursive: an unreadable SUBDIRECTORY ----------------
+do
+  -- Synthetic tree, so this does not depend on chmod behaving the same for
+  -- root and non-root test runners. /synth/b stats as a directory but cannot
+  -- be listed -- the permission-denied case.
+  local listable = {
+    ["/synth"] = {"a", "b"},
+    ["/synth/a"] = {},
+  }
+  local dirs_that_exist = {["/synth"] = true, ["/synth/a"] = true, ["/synth/b"] = true}
+  -- No symlinkattributes: also covers _link_mode's fallback to attributes().
+  local synth_lfs = {
+    attributes = function(path, what)
+      if what ~= "mode" then return nil end
+      return dirs_that_exist[path] and "directory" or nil
+    end,
+    dir = function(d)
+      local entries = listable[d]
+      if not entries then error("permission denied: " .. d) end
+      local list = {".", ".."}
+      for _, e in ipairs(entries) do list[#list + 1] = e end
+      local i = 0
+      return function() i = i + 1; return list[i] end
+    end,
+  }
+
+  local dirs, enumerated = internals.list_directories_recursive("/synth", synth_lfs)
+  assertEq(enumerated, false,
+    "a subdirectory that cannot be read makes the whole enumeration untrusted")
+  -- The partial result is still returned: those directories DO get imported,
+  -- which is why import_batch's note reports a count instead of claiming
+  -- "only that path was imported".
+  assertEq(#dirs, 3, "the directories that were readable are still returned")
+  assertEq(dirs[1], "/synth", "partial enumeration is still sorted, root first")
+end
+
 -- ---- import_batch honours `recursive` itself -------------------------------
 do
   -- Regression: `recursive` used to be read, defaulted to true, echoed back in
@@ -1023,7 +1169,91 @@ do
 
   -- Ceiling of 10s: long enough for a several-hundred-file card import, short
   -- enough to bound how long the worker is blocked.
-  assertEq(cfg.attempts * cfg.interval_ms, 10000, "import poll ceiling is 10s")
+  assertEq(cfg.deadline_seconds, 10, "import poll wall-clock ceiling is 10s")
+  assertEq(cfg.attempts * cfg.interval_ms, 10000,
+    "the sleep budget matches the wall-clock deadline")
+
+  stub_dt.control.sleep = original_sleep
+  stub_dt.database = original_db
+end
+
+-- ---- poll_for_imported: gives up early when NOTHING arrives ----------------
+do
+  -- Every attempt runs count_images_under, a full linear scan of dt.database.
+  -- The old loop ran all 100 of them whenever the count stayed 0 -- the bad
+  -- path / "darktable rejected the folder" case -- so the worst case was 100
+  -- full library scans, not the 10s the comment claimed. On a 30k-image
+  -- library that is minutes of head-of-line blocking for every other bridge
+  -- request, past the client's own 120s budget.
+  local original_db = stub_dt.database
+  local original_sleep = stub_dt.control.sleep
+  local cfg = internals.import_poll
+
+  -- Count the SCANS, not the sleeps: the scans are the expensive half, and
+  -- counting sleeps is exactly the mistake the old comment made. ipairs()
+  -- probes index 1 first on an empty database, so this tallies one per scan.
+  local scans = 0
+  stub_dt.database = setmetatable({}, {__index = function(_, k)
+    if k == 1 then scans = scans + 1 end
+    return nil
+  end})
+  stub_dt.control.sleep = function(_) end
+
+  local count, incomplete = internals.poll_for_imported("/dest/rejected")
+  assertEq(count, 0, "a folder that registered nothing reports 0")
+  assertEq(incomplete, true, "and is still flagged scan_incomplete")
+  assertTrue(scans <= cfg.zero_grace_polls,
+    "a count stuck at zero stops after the grace window, not " .. cfg.attempts
+    .. " full library scans (ran " .. scans .. ")")
+  assertTrue(scans < cfg.attempts,
+    "the early exit really is earlier than the attempt ceiling")
+  assertTrue(cfg.zero_grace_polls * cfg.interval_ms <= 3000,
+    "the zero-result grace window is a couple of seconds, not the full budget")
+
+  stub_dt.control.sleep = original_sleep
+  stub_dt.database = original_db
+end
+
+-- ---- poll_for_imported: the wall-clock deadline bounds the SCANS -----------
+do
+  -- Bounding attempts is not the same as bounding time. If each scan is slow
+  -- (a big library), the attempt ceiling can be nowhere near reached while the
+  -- wall clock runs past the caller's budget. Drive an injected clock that
+  -- jumps forward per attempt and prove the poll stops on time.
+  local original_db = stub_dt.database
+  local original_sleep = stub_dt.control.sleep
+  local cfg = internals.import_poll
+
+  -- Images keep arriving, so neither the settle path nor the zero-grace exit
+  -- can fire; only the deadline can stop this.
+  local films = {}
+  stub_dt.database = films
+  local ticks = 0
+  stub_dt.control.sleep = function(_)
+    ticks = ticks + 1
+    films[#films + 1] = {film = {path = "/slow/sub" .. ticks}}
+  end
+
+  -- 3 simulated seconds per scan: the deadline lands on attempt 4-5, decades
+  -- short of the 100-attempt ceiling.
+  local fake_seconds = 0
+  local function fake_now()
+    local t = fake_seconds
+    fake_seconds = fake_seconds + 3
+    return t
+  end
+
+  local count, incomplete =
+    internals.poll_for_imported("/slow", {now = fake_now})
+  assertEq(incomplete, true, "a poll cut off by the deadline is flagged incomplete")
+  assertTrue(count > 0, "the deadline still reports the floor reached so far")
+  assertTrue(ticks < cfg.attempts,
+    "the wall-clock deadline stops the poll long before the attempt ceiling "
+    .. "(ran " .. ticks .. " of " .. cfg.attempts .. ")")
+  assertTrue(fake_seconds <= (cfg.deadline_seconds + 6),
+    "the poll does not overrun its wall-clock budget by more than one scan "
+    .. "(simulated " .. fake_seconds .. "s for a " .. cfg.deadline_seconds
+    .. "s budget)")
 
   stub_dt.control.sleep = original_sleep
   stub_dt.database = original_db

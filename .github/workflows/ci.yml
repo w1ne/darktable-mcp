@@ -1,7 +1,12 @@
 name: CI
 
 on:
+  # Restricted to main (and tags): an unfiltered `push` alongside
+  # `pull_request` runs the whole matrix twice for every commit on a PR
+  # branch — 10 jobs where 5 will do. `pull_request` covers branches.
   push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
   # Weekly run against a fresh dependency resolution. Push/PR builds only prove the
   # code still works against the deps that existed when it was written; the scheduled

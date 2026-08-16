@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  # Restricted to main (and tags): an unfiltered `push` alongside
+  # `pull_request` runs the whole matrix twice for every commit on a PR
+  # branch — 10 jobs where 5 will do. `pull_request` covers branches.
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  # Weekly run against a fresh dependency resolution. Push/PR builds only prove the
+  # code still works against the deps that existed when it was written; the scheduled
+  # run is what catches an upstream release breaking us with no commit of our own
+  # (e.g. mcp 2.0.0 dropping the @server.list_tools() / @server.call_tool() decorators).
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the real floor: every mcp release in the pinned range declares
+        # Requires-Python >=3.10, so the package cannot install on 3.9.
+        python-version: ['3.10', '3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # tests/test_lua_dispatcher.py skips itself when no `lua` is on PATH, and a
+      # skipped test reads as green. Install the interpreter so it actually runs,
+      # and set DARKTABLE_MCP_REQUIRE_LUA below so that if a future runner image
+      # loses Lua the suite goes red instead of quietly skipping.
+      - name: Install Lua interpreter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+          command -v lua || sudo ln -s "$(command -v lua5.4)" /usr/local/bin/lua
+          lua -v
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Run tests
+        env:
+          DARKTABLE_MCP_REQUIRE_LUA: '1'
+        run: python -m pytest -q
+
+  lint:
+    name: lint (advisory)
+    runs-on: ubuntu-latest
+    # Advisory only: the tree carries a pre-existing lint backlog (~143 ruff findings
+    # across server.py, tools/preview_tools.py and tools/camera_tools.py, plus 13 files
+    # black would reformat) that is outside the scope of the change adding this
+    # workflow. Drop continue-on-error once that backlog is cleared, so lint becomes a
+    # real gate instead of a report nobody is required to read.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: ruff
+        run: ruff check .
+
+      - name: black
+        # `if: always()` so a ruff failure does not hide the black result — a failed
+        # step otherwise skips every step after it, halving what this job reports.
+        if: always()
+        run: black --check .
+
+  lua:
+    name: lua dispatcher
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua interpreter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+          command -v lua || sudo ln -s "$(command -v lua5.4)" /usr/local/bin/lua
+          lua -v
+
+      # Mirrors tests/test_lua_dispatcher.py: `lua tests/lua/test_dispatcher.lua`
+      # run from the repo root, which the script relies on for its package.path.
+      - name: Run Lua dispatcher tests
+        run: lua tests/lua/test_dispatcher.lua

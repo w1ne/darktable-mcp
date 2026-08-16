@@ -8,12 +8,17 @@ from pathlib import Path
 
 import pytest
 
+from darktable_mcp.bridge import client as bridge_client
 from darktable_mcp.bridge.client import (
+    DEFAULT_TIMEOUTS,
+    FALLBACK_TIMEOUT,
+    POLL_INTERVAL_SECONDS,
     Bridge,
     BridgeError,
     BridgePluginNotInstalledError,
     BridgeProtocolError,
     BridgeTimeoutError,
+    resolve_timeout,
 )
 
 
@@ -162,6 +167,63 @@ def test_call_cleans_up_response_file_on_success(cache_dir, fake_plugin_lua_file
         assert leftover == [], f"response file not cleaned up: {leftover}"
     finally:
         plugin.stop()
+
+
+class TestTimeoutResolution:
+    """A single 5s budget for every method made slow-but-healthy calls (a full
+    `dt.database` scan, darktable's own importer) look like "darktable is not
+    running". Budgets are now per method."""
+
+    def test_known_method_uses_its_table_entry(self):
+        assert resolve_timeout("import_batch") == DEFAULT_TIMEOUTS["import_batch"]
+        assert resolve_timeout("view_photos") == DEFAULT_TIMEOUTS["view_photos"]
+
+    def test_unknown_method_falls_back(self):
+        assert resolve_timeout("no_such_method") == FALLBACK_TIMEOUT
+
+    def test_explicit_caller_value_wins_over_table(self):
+        assert resolve_timeout("import_batch", 0.25) == 0.25
+
+    def test_explicit_caller_value_wins_over_fallback(self):
+        assert resolve_timeout("no_such_method", 0.25) == 0.25
+
+    def test_every_budget_beats_the_old_hardcoded_five_seconds(self):
+        assert all(v > 5.0 for v in DEFAULT_TIMEOUTS.values())
+        assert FALLBACK_TIMEOUT > 5.0
+
+    def test_poll_interval_is_a_named_constant(self):
+        assert 0 < POLL_INTERVAL_SECONDS < 1.0
+
+
+def test_call_applies_the_per_method_default_when_no_timeout_given(
+    cache_dir, fake_plugin_lua_file, monkeypatch
+):
+    monkeypatch.setitem(DEFAULT_TIMEOUTS, "view_photos", 0.3)
+    bridge = Bridge()
+    start = time.monotonic()
+    with pytest.raises(BridgeTimeoutError, match="0.3s"):
+        bridge.call("view_photos", {})
+    assert time.monotonic() - start < 3.0, "did not use the 0.3s table entry"
+
+
+def test_call_applies_the_fallback_for_unknown_methods(
+    cache_dir, fake_plugin_lua_file, monkeypatch
+):
+    monkeypatch.setattr(bridge_client, "FALLBACK_TIMEOUT", 0.3)
+    bridge = Bridge()
+    with pytest.raises(BridgeTimeoutError, match="0.3s"):
+        bridge.call("no_such_method", {})
+
+
+def test_timeout_message_names_the_method_and_the_budget_used(
+    cache_dir, fake_plugin_lua_file
+):
+    bridge = Bridge()
+    with pytest.raises(BridgeTimeoutError) as exc:
+        bridge.call("import_batch", {}, timeout=0.4)
+    message = str(exc.value)
+    assert "import_batch" in message
+    assert "0.4s" in message
 
 
 def test_concurrent_calls_get_correct_results(cache_dir, fake_plugin_lua_file):

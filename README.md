@@ -42,13 +42,20 @@ client; this server drives darktable.
 
 **Ratings for photos darktable already knows need one manual step.** darktable prefers its own `library.db` over the sidecar for images already in the library, so writing a sidecar changes nothing on screen. When this is detected the summary warns and names the affected files; run *selected image(s) → read sidecar files* in the lighttable to pull them in.
 
-**`open_in_darktable` fails loudly when darktable is already running.** darktable is single-instance and holds a lock on `library.db`, so a second launch dies immediately — and an already-open session is the *normal* state when the bridge-backed library tools are in use. The tool used to report a phantom pid; it now waits, notices the child died, and returns the reason.
+**`open_in_darktable` no longer claims a launch it didn't get.** An already-open darktable is the *normal* state when the bridge-backed library tools are in use, and it holds the lock on `library.db`. What darktable then does is platform-dependent, and neither branch is a launch:
+
+| | behaviour | reported as |
+|---|---|---|
+| Linux (session D-Bus present) | hands the folder to the running instance, child exits 0 | `handed_off_to_running_instance: true` — look at the open window |
+| macOS (no session D-Bus) | handoff fails on a GLib assertion and the child **hangs forever** | `launched: false` with the reason; the hung child is killed |
+
+The tool used to report a phantom pid in both cases. Detection reads what darktable *says*, not whether the process is alive — on macOS it stays alive indefinitely, so liveness proves nothing. Verified against darktable 5.6.0.
 
 **Export:**
 
 - `export_images(photo_ids, output_path, format, quality?, max_width?, max_height?)` — Export to JPEG/PNG/TIFF via `darktable-cli`. Runs in an isolated config dir under `$XDG_CACHE_HOME/darktable-mcp/cli-config/`, so exports work even when the GUI is open (no `database is locked` race against the user's `~/.config/darktable/library.db`). Files export in parallel, and the output is `stat`ed afterwards — darktable-cli can exit 0 without writing anything, which used to be reported as success. Per-file results land in `<output_path>/.export_images.jsonl`; the tool response is bounded — counts, side-file path, and the first error if any.
 
-  Output names are **de-collided**: two inputs with the same stem from different folders no longer overwrite each other, so read the real path from the `output` field rather than assuming `<stem>.<format>`.
+  Output names are **de-collided**: two inputs with the same stem from different folders no longer overwrite each other, so read the real path from the `output` field rather than assuming `<stem>.<format>`. Note darktable-cli picks the extension itself — `jpeg` writes `.jpg` and `tiff` writes `.tif`. Each parallel worker gets its own config dir, because concurrent `darktable-cli` processes sharing one contend for the same `library.db` and one of them silently writes nothing.
 
   **Sidecar caveat:** because the config dir is isolated from the GUI's, exports read develop settings from XMP sidecars only. If darktable's *write sidecar file for each image* preference is off, files export **without their edits** and darktable-cli still reports success.
 

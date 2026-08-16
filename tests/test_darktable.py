@@ -324,8 +324,8 @@ class TestBatchExportCollisions:
         outputs = [r.output for r in results]
         assert all(r.ok for r in results)
         assert len(set(outputs)) == 2
-        assert outputs[0] == str(tmp_path / "out" / "DSC_0001.jpeg")
-        assert outputs[1] == str(tmp_path / "out" / "DSC_0001-shootB.jpeg")
+        assert outputs[0] == str(tmp_path / "out" / "DSC_0001.jpg")
+        assert outputs[1] == str(tmp_path / "out" / "DSC_0001-shootB.jpg")
 
     @patch("darktable_mcp.darktable.cli_wrapper.subprocess.run")
     @patch("shutil.which", return_value="/usr/bin/darktable-cli")
@@ -344,7 +344,7 @@ class TestBatchExportCollisions:
 
         outputs = [r.output for r in results]
         assert len(set(outputs)) == 3
-        assert outputs[2] == str(tmp_path / "out" / "DSC_0001-2.jpeg")
+        assert outputs[2] == str(tmp_path / "out" / "DSC_0001-2.jpg")
 
     @patch("darktable_mcp.darktable.cli_wrapper.subprocess.run")
     @patch("shutil.which", return_value="/usr/bin/darktable-cli")
@@ -381,7 +381,7 @@ class TestBatchExportParallelism:
 
         assert [r.input for r in results] == [str(p) for p in inputs]
         assert [r.output for r in results] == [
-            str(tmp_path / "out" / f"{i}.jpeg") for i in range(8)
+            str(tmp_path / "out" / f"{i}.jpg") for i in range(8)
         ]
 
     @patch("darktable_mcp.darktable.cli_wrapper.subprocess.run")
@@ -421,3 +421,76 @@ class TestBatchExportParallelism:
 
         assert len(results) == 6
         assert all(r.ok for r in results)
+
+
+class TestRealDarktableRegressions:
+    """Regressions found by running against a real darktable 5.6.0.
+
+    Both of these passed the mocked suite and failed on real hardware, so
+    they are pinned here explicitly.
+    """
+
+    @pytest.mark.parametrize(
+        "format_type,expected_ext",
+        [("jpeg", "jpg"), ("jpg", "jpg"), ("png", "png"), ("tiff", "tif"), ("tif", "tif")],
+    )
+    def test_planned_extension_matches_what_darktable_cli_writes(
+        self, format_type, expected_ext, tmp_path
+    ):
+        """darktable-cli renames the output to the format's own extension.
+
+        Ask it for `out.jpeg` and it writes `out.jpg`; ask for `out.tiff`
+        and it writes `out.tif`. Planning the requested name instead of the
+        written one made the post-export existence check fail on files that
+        had exported perfectly well.
+        """
+        planned = CLIWrapper._plan_output_paths(
+            [Path("/src/DSC_0001.NEF")], tmp_path / "out", format_type
+        )
+
+        assert planned[0].suffix == f".{expected_ext}"
+
+    @patch("shutil.which", return_value="/usr/bin/darktable-cli")
+    def test_each_worker_thread_gets_its_own_configdir(self, _mock_which, tmp_path):
+        """Concurrent darktable-cli processes must not share a configdir.
+
+        They contend for the same library.db; observed on darktable 5.6.0,
+        two parallel exports sharing one configdir produced a single output
+        file and no error worth the name -- silent data loss.
+        """
+        wrapper = CLIWrapper(configdir=tmp_path / "cfg")
+        seen: list = []
+        barrier = threading.Barrier(3)
+
+        def collect():
+            barrier.wait(timeout=5)
+            seen.append(wrapper._worker_configdir())
+
+        threads = [threading.Thread(target=collect) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert len(seen) == 3
+        assert len(set(seen)) == 3, f"configdirs collided across threads: {seen}"
+
+    @patch("shutil.which", return_value="/usr/bin/darktable-cli")
+    def test_worker_configdir_is_stable_within_one_thread(self, _mock_which, tmp_path):
+        """Threads are reused across a batch: one library.db per worker, not per file."""
+        wrapper = CLIWrapper(configdir=tmp_path / "cfg")
+
+        assert wrapper._worker_configdir() == wrapper._worker_configdir()
+
+    @patch("darktable_mcp.darktable.cli_wrapper.subprocess.run")
+    @patch("shutil.which", return_value="/usr/bin/darktable-cli")
+    def test_export_command_carries_the_calling_threads_configdir(
+        self, _mock_which, mock_run, tmp_path
+    ):
+        mock_run.side_effect = fake_run()
+        wrapper = CLIWrapper(configdir=tmp_path / "cfg")
+        wrapper.batch_export([Path("/src/a.NEF")], tmp_path / "out")
+
+        cmd = mock_run.call_args[0][0]
+        assert "--configdir" in cmd
+        assert str(tmp_path / "cfg") in cmd[cmd.index("--configdir") + 1]

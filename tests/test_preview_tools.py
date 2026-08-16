@@ -1151,23 +1151,32 @@ class TestOpenInDarktable:
 
 
 class _FakePopen:
-    """Stand-in for subprocess.Popen with a scripted exit code."""
+    """Stand-in for subprocess.Popen with a scripted exit code.
+
+    stdout/stderr are real readable streams, because that is where the
+    library-lock notice actually arrives: darktable stays *alive* after a
+    failed handoff on macOS, so liveness tells us nothing and the only
+    signal is what it wrote to the pipe.
+    """
 
     def __init__(self, exit_code: int | None, out: bytes = b"", err: bytes = b"") -> None:
         self.pid = 4242
         self._exit_code = exit_code
-        self._out = out
-        self._err = err
-        self.stdout = None
-        self.stderr = None
+        self.stdout = io.BytesIO(out)
+        self.stderr = io.BytesIO(err)
         self.communicate_calls = 0
+        self.killed = False
 
     def poll(self):
         return self._exit_code
 
+    def kill(self):
+        self.killed = True
+        self._exit_code = -9
+
     def communicate(self, timeout=None):
         self.communicate_calls += 1
-        return self._out, self._err
+        return b"", b""
 
 
 class TestLaunchVerification:
@@ -1183,13 +1192,58 @@ class TestLaunchVerification:
         monkeypatch.setattr(pt, "_LAUNCH_PROBE_SECONDS", 0.05)
         monkeypatch.setattr(pt, "_LAUNCH_POLL_INTERVAL", 0.01)
 
-    def test_immediate_exit_raises_with_the_library_lock_reason(
+    def test_lock_notice_while_child_stays_alive_is_not_a_launch(
         self, tmp_path: Path, monkeypatch
     ) -> None:
+        """The macOS case, verified against darktable 5.6.0.
+
+        darktable sees the lock, fails to hand off over D-Bus (there is no
+        session bus), and then HANGS. `poll()` returns None forever, so a
+        liveness-only probe reports a successful launch and a pid for a
+        process that will never show a window.
+        """
         proc = _FakePopen(
-            exit_code=1,
-            err=b"ERROR: the database lock file contains a pid that seems to be alive",
+            exit_code=None,
+            out=(
+                b"[init] the database lock file contains a pid that seems to be alive"
+                b" in your system: 48712\n"
+                b"[init] database is locked, probably another process is already"
+                b" using it\n"
+                b"[dt_init] trying to open the images in the running instance\n"
+            ),
         )
+        self._patch(monkeypatch, proc)
+
+        result = open_in_darktable(tmp_path, rating=5)
+
+        assert result["launched"] is False
+        assert result["pid"] is None
+        assert result["handed_off_to_running_instance"] is False
+        assert "already running" in result["reason"]
+        # A hung child we spawned is ours to clean up.
+        assert proc.killed is True
+
+    def test_lock_notice_with_clean_exit_reports_handoff(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The Linux case: the handoff succeeds and the images open in the running window."""
+        proc = _FakePopen(
+            exit_code=0,
+            out=b"[dt_init] trying to open the images in the running instance\n",
+        )
+        self._patch(monkeypatch, proc)
+
+        result = open_in_darktable(tmp_path, rating=5)
+
+        assert result["launched"] is False
+        assert result["handed_off_to_running_instance"] is True
+        assert "handed the folder to the running session" in result["reason"]
+        assert proc.killed is False
+
+    def test_immediate_exit_without_lock_notice_still_raises(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        proc = _FakePopen(exit_code=1, err=b"some other startup failure\n")
         self._patch(monkeypatch, proc)
 
         with pytest.raises(DarktableMCPError) as excinfo:
@@ -1198,11 +1252,8 @@ class TestLaunchVerification:
         message = str(excinfo.value)
         assert "exited immediately" in message
         assert "exit code 1" in message
-        assert "library.db" in message
-        assert "already" in message
         # The captured output is surfaced, not swallowed.
-        assert "database lock file" in message
-        assert proc.communicate_calls == 1
+        assert "some other startup failure" in message
 
     def test_immediate_exit_zero_also_reports_failure(
         self, tmp_path: Path, monkeypatch

@@ -1,10 +1,12 @@
 """Command-line wrapper for darktable operations."""
 
+import itertools
 import logging
 import os
 import re
 import shutil
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +17,26 @@ from ..utils.errors import DarktableNotFoundError, ExportError
 logger = logging.getLogger(__name__)
 
 _SAFE_SUFFIX_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+# darktable-cli picks the output extension from the format itself and
+# ignores the one we ask for: request `out.jpeg` and it writes `out.jpg`,
+# request `out.tiff` and it writes `out.tif`. Naming the output with the
+# wrong extension makes the post-export existence check fail on a file
+# that actually exported fine, so plan the name darktable-cli will use.
+# Verified against darktable 5.6.0.
+FORMAT_EXTENSIONS = {
+    "jpeg": "jpg",
+    "jpg": "jpg",
+    "png": "png",
+    "tiff": "tif",
+    "tif": "tif",
+}
+
+
+def _output_extension(format_type: str) -> str:
+    """Return the file extension darktable-cli actually writes for a format."""
+    fmt = format_type.lower()
+    return FORMAT_EXTENSIONS.get(fmt, fmt)
 
 
 @dataclass
@@ -62,6 +84,32 @@ class CLIWrapper:
         self.darktable_cli_path = darktable_cli_path or self._find_darktable_cli()
         self.configdir = Path(configdir) if configdir else self._default_configdir()
         self.configdir.mkdir(parents=True, exist_ok=True)
+        # Concurrent darktable-cli processes must not share a configdir: they
+        # contend for the same library.db and one of them silently produces no
+        # output file at all (observed on darktable 5.6.0 — two parallel
+        # exports, only one file written, both exiting non-zero with nothing
+        # but a "notice:" on stderr). Hand every worker thread its own
+        # sub-configdir instead. Threads are reused across the batch, so this
+        # costs one library.db per worker, not per file.
+        self._thread_state = threading.local()
+        self._slot_counter = itertools.count()
+
+    def _worker_configdir(self) -> Path:
+        """Return a configdir private to the calling thread.
+
+        The main thread keeps `self.configdir` itself, so single-threaded
+        callers and existing behaviour are unchanged; pool workers get
+        `<configdir>/worker-N/`.
+        """
+        slot = getattr(self._thread_state, "slot", None)
+        if slot is None:
+            slot = next(self._slot_counter)
+            self._thread_state.slot = slot
+        if slot == 0:
+            return self.configdir
+        worker_dir = self.configdir / f"worker-{slot}"
+        worker_dir.mkdir(parents=True, exist_ok=True)
+        return worker_dir
 
     @staticmethod
     def _default_configdir() -> Path:
@@ -165,7 +213,7 @@ class CLIWrapper:
                 cmd.extend(["--height", str(max_height or 0)])
 
             # Everything after `--core` is handed to the darktable core.
-            cmd.extend(["--core", "--configdir", str(self.configdir)])
+            cmd.extend(["--core", "--configdir", str(self._worker_configdir())])
 
             fmt = format_type.lower()
             if fmt == "jpeg":
@@ -231,12 +279,13 @@ class CLIWrapper:
         Args:
             input_files: Input paths, in the caller's order
             output_dir: Directory every output lands in
-            format_type: Export format, used as the file extension
+            format_type: Export format; the extension is the one
+                darktable-cli actually writes for it, not the format name
 
         Returns:
             List[Path]: One output path per input, all distinct
         """
-        ext = format_type.lower()
+        ext = _output_extension(format_type)
         taken = set()
         planned: List[Path] = []
 

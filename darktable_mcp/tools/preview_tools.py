@@ -916,24 +916,52 @@ def build_darktable_command(
 
 
 # How long to watch a freshly spawned darktable before believing it started.
-# A launch blocked by the library.db lock dies well inside this window.
-_LAUNCH_PROBE_SECONDS = 1.5
+_LAUNCH_PROBE_SECONDS = 3.0
 _LAUNCH_POLL_INTERVAL = 0.25
 _LAUNCH_OUTPUT_CHARS = 800
 
+# What darktable prints when the library.db lock is already held. Liveness
+# alone is NOT enough to detect this, and the behaviour is platform-specific:
+# darktable notices the lock, then tries to hand the files to the running
+# instance over D-Bus. On Linux that handoff usually succeeds and the child
+# exits 0 having opened the images in the existing window. On macOS there is
+# no session D-Bus, the handoff fails with a GLib assertion, and the child
+# then HANGS indefinitely — alive, but never showing anything. Observed on
+# darktable 5.6.0. So we watch what the child says, not just whether it runs.
+_LOCK_SIGNATURES = (
+    "database is locked",
+    "trying to open the images in the running instance",
+    "the database lock file contains a pid",
+)
 
-def _drain_in_background(proc: Any) -> None:
+
+def _drain_in_background(proc: Any, sink: Optional[List[str]] = None) -> None:
     """Consume a live child's stdout/stderr on daemon threads.
 
     Keeps the pipes readable without ever blocking the child on a full pipe
     buffer, and without closing the read end (which would hand darktable a
-    SIGPIPE the first time it logged something).
+    SIGPIPE the first time it logged something). When `sink` is given, the
+    first `_LAUNCH_OUTPUT_CHARS` of output are retained so the caller can
+    tell a real launch from one that is quietly blocked on the lock.
     """
+    lock = threading.Lock()
 
     def _pump(stream: Any) -> None:
         try:
-            for _ in iter(lambda: stream.read(8192), b""):
-                pass
+            # readline, NOT read(n): a blocking read(8192) waits for the
+            # full 8192 bytes, so a live child that logs only a couple of
+            # hundred bytes (exactly the library-lock notice) would never
+            # surface them. readline returns on each newline.
+            for chunk in iter(stream.readline, b""):
+                if not chunk:
+                    break
+                if sink is None:
+                    continue
+                if isinstance(chunk, bytes):
+                    chunk = chunk.decode("utf-8", "replace")
+                with lock:
+                    if sum(len(c) for c in sink) < _LAUNCH_OUTPUT_CHARS:
+                        sink.append(str(chunk))
         except (OSError, ValueError):  # pragma: no cover — stream torn down
             pass
         finally:
@@ -947,30 +975,24 @@ def _drain_in_background(proc: Any) -> None:
             threading.Thread(target=_pump, args=(stream,), daemon=True).start()
 
 
-def _collect_exit_output(proc: Any) -> str:
-    """Read whatever a dead child wrote. Safe: the process has already exited."""
-    try:
-        out, err = proc.communicate(timeout=5)
-    except Exception:  # pragma: no cover — defensive
-        return ""
-    chunks: List[str] = []
-    for blob in (out, err):
-        if not blob:
-            continue
-        if isinstance(blob, bytes):
-            blob = blob.decode("utf-8", "replace")
-        text = str(blob).strip()
-        if text:
-            chunks.append(text)
-    joined = "\n".join(chunks)
-    return joined[-_LAUNCH_OUTPUT_CHARS:] if joined else ""
+def _looks_blocked_by_lock(text: str) -> bool:
+    """True when darktable's output says another instance holds the library."""
+    lowered = text.lower()
+    return any(sig in lowered for sig in _LOCK_SIGNATURES)
 
 
-def _wait_for_launch(proc: Any) -> Optional[int]:
-    """Poll a freshly spawned process briefly. Returns its exit code, or None if alive."""
+def _wait_for_launch(proc: Any, sink: Optional[List[str]] = None) -> Optional[int]:
+    """Poll a freshly spawned process briefly.
+
+    Returns its exit code, or None if still alive. Stops early once the
+    child has announced that the library is locked, so a hung macOS child
+    does not cost the full probe window.
+    """
     deadline = time.monotonic() + _LAUNCH_PROBE_SECONDS
     code: Optional[int] = proc.poll()
     while code is None and time.monotonic() < deadline:
+        if sink is not None and _looks_blocked_by_lock("".join(sink)):
+            break
         time.sleep(_LAUNCH_POLL_INTERVAL)
         code = proc.poll()
     return code
@@ -1055,21 +1077,63 @@ def open_in_darktable(
         start_new_session=True,
     )
 
-    exit_code = _wait_for_launch(proc)
-    if exit_code is not None:
-        detail = _collect_exit_output(proc)
+    # Start draining immediately: darktable is chatty at startup (it logs every
+    # bundled style it imports), and an undrained 64KB pipe buffer would block
+    # the child inside our own probe window.
+    captured: List[str] = []
+    _drain_in_background(proc, captured)
+
+    exit_code = _wait_for_launch(proc, captured)
+    detail = "".join(captured).strip()[-_LAUNCH_OUTPUT_CHARS:]
+    blocked = _looks_blocked_by_lock(detail)
+
+    if blocked:
+        # A running session holds ~/.config/darktable/library.db. darktable
+        # tries to hand the files to that instance over D-Bus; on Linux that
+        # usually works and this child exits 0, on macOS it fails and the
+        # child hangs. Either way this call did not open a new window, and a
+        # hung child is ours to clean up.
+        if exit_code is None:
+            try:
+                proc.kill()
+            except Exception:  # pragma: no cover — defensive
+                pass
+        handed_off = exit_code == 0
         message = (
-            f"darktable exited immediately (exit code {exit_code}) instead of staying "
-            "open. darktable is single-instance: a running session holds the lock on "
-            "~/.config/darktable/library.db, so a second launch aborts. Switch to the "
-            "darktable window that is already open instead of launching a new one "
-            "(the bridge-based tools in this project need that session anyway)."
+            "darktable is already running and holds the lock on "
+            "~/.config/darktable/library.db, so this call did not open a new "
+            "window. "
+            + (
+                "It handed the folder to the running session instead — look at "
+                "the darktable window that is already open."
+                if handed_off
+                else "The handoff to the running session did not complete "
+                "(no session D-Bus, which is normal on macOS), so nothing was "
+                "opened. Switch to the darktable window that is already open "
+                "and select the film roll there."
+            )
+            + " The bridge-based tools in this project need that session anyway."
+        )
+        return {
+            "command": cmd,
+            "pid": None,
+            "filter_hint": filter_hint,
+            "launched": False,
+            "handed_off_to_running_instance": handed_off,
+            "reason": message,
+            "detail": detail,
+            "dry_run": False,
+        }
+
+    if exit_code is not None:
+        message = (
+            f"darktable exited immediately (exit code {exit_code}) instead of "
+            "staying open."
         )
         if detail:
             message += f"\ndarktable said:\n{detail}"
         raise DarktableMCPError(message)
 
-    _drain_in_background(proc)
     return {
         "command": cmd,
         "pid": proc.pid,

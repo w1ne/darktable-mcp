@@ -8,9 +8,16 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from mcp.server import Server
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+)
 
 from .bridge.client import (
     Bridge,
@@ -40,12 +47,23 @@ class DarktableMCPServer:
     """MCP server for darktable photo management and editing."""
 
     def __init__(self) -> None:
-        self.app: Server = Server("darktable-mcp")
+        # mcp 2.x removed the @server.list_tools() / @server.call_tool()
+        # decorators; the low-level Server now takes the same two handlers as
+        # constructor kwargs, dispatched by method string. The handcrafted
+        # `Tool` list below is why this stays on the low-level surface rather
+        # than moving to MCPServer: MCPServer derives each inputSchema from the
+        # handler's signature, which injects pydantic `title` keys and cannot
+        # express the `ratings` map's per-value `minimum`/`maximum`, so the
+        # agent-facing contract would drift.
+        self.app: Server[Any] = Server(
+            "darktable-mcp",
+            on_list_tools=self._on_list_tools,
+            on_call_tool=self._on_call_tool,
+        )
         self._cli: CLIWrapper | None = None
         self.camera_tools = CameraTools()
         self.bridge = Bridge()
         self._handler_map: dict[str, ToolHandler] = self._build_handlers()
-        self._setup_tools()
 
     @property
     def cli(self) -> CLIWrapper:
@@ -54,24 +72,43 @@ class DarktableMCPServer:
             self._cli = CLIWrapper()
         return self._cli
 
-    def _setup_tools(self) -> None:
-        @self.app.list_tools()
-        async def list_tools() -> list[Tool]:
-            return self._tool_definitions()
+    async def _on_list_tools(
+        self,
+        ctx: ServerRequestContext[Any],
+        params: PaginatedRequestParams | None,
+    ) -> ListToolsResult:
+        """Serve `tools/list`. The whole catalogue fits one page, so no cursor."""
+        return ListToolsResult(tools=self._tool_definitions())
 
-        @self.app.call_tool()
-        async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-            handler = self._handler_map.get(name)
-            if handler is None:
-                return [TextContent(type="text", text=f"Unknown tool: {name}")]
-            try:
-                return await handler(arguments)
-            except DarktableMCPError as e:
-                logger.error("Tool %s failed: %s", name, e)
-                return [TextContent(type="text", text=f"Error: {e}")]
-            except Exception as e:
-                logger.exception("Tool %s crashed", name)
-                return [TextContent(type="text", text=f"Tool {name} crashed: {e}")]
+    async def _on_call_tool(
+        self,
+        ctx: ServerRequestContext[Any],
+        params: CallToolRequestParams,
+    ) -> CallToolResult:
+        """Serve `tools/call`.
+
+        Every outcome — unknown tool, DarktableMCPError, unexpected crash —
+        comes back as ordinary text content with the default ``isError=False``,
+        exactly as the 1.x decorator produced. open_in_darktable depends on
+        this: a raised DarktableMCPError must reach the agent as tool output it
+        can read and act on, not as a JSON-RPC transport error.
+        """
+        return CallToolResult(
+            content=list(await self._call_tool(params.name, params.arguments or {}))
+        )
+
+    async def _call_tool(self, name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        handler = self._handler_map.get(name)
+        if handler is None:
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        try:
+            return await handler(arguments)
+        except DarktableMCPError as e:
+            logger.error("Tool %s failed: %s", name, e)
+            return [TextContent(type="text", text=f"Error: {e}")]
+        except Exception as e:
+            logger.exception("Tool %s crashed", name)
+            return [TextContent(type="text", text=f"Tool {name} crashed: {e}")]
 
     def _tool_definitions(self) -> list[Tool]:
         return [
@@ -85,7 +122,7 @@ class DarktableMCPServer:
                     "Requires darktable to be running with the darktable-mcp "
                     "Lua plugin installed (see darktable-mcp install-plugin)."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "filter": {
@@ -115,7 +152,7 @@ class DarktableMCPServer:
                     "darktable library. Requires darktable to be running with "
                     "the darktable-mcp Lua plugin installed."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "photo_ids": {
@@ -143,7 +180,7 @@ class DarktableMCPServer:
                     "darktable to be running with the darktable-mcp Lua plugin "
                     "installed."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "source_path": {
@@ -168,7 +205,7 @@ class DarktableMCPServer:
                     "must match exactly. Requires darktable to be running with the "
                     "darktable-mcp Lua plugin installed."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {},
                 },
@@ -182,7 +219,7 @@ class DarktableMCPServer:
                     "darktable to be running with the darktable-mcp Lua plugin "
                     "installed."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "photo_ids": {
@@ -216,9 +253,15 @@ class DarktableMCPServer:
                     "same destination. Import the destination recursively. "
                     "A file that would collide with a different photo already "
                     "on disk is kept alongside it as <name>-2.<ext>, never "
-                    "overwritten. Two bodies of the SAME model that report no "
-                    "serial number cannot be told apart — give those separate "
-                    "destinations. "
+                    "overwritten. This holds for two bodies of the same model "
+                    "that report no serial number and therefore share a "
+                    "subdirectory: before skipping files a destination appears "
+                    "to already hold, such a camera is asked for a small "
+                    "sample of them and the bytes are compared, so a second "
+                    "body's photos are kept rather than dropped. Re-running is "
+                    "cheap: a body with a serial number transfers nothing it "
+                    "already delivered. Any file the card lists that does not "
+                    "reach the destination is reported by name. "
                     "Cost: this tool runs to completion synchronously and does "
                     "not return early. A full card can take many minutes, up to "
                     "the 1 hour default timeout, which is longer than most MCP "
@@ -226,7 +269,7 @@ class DarktableMCPServer:
                     "while it runs by tailing the .import.log file in the "
                     "destination directory."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "destination": {
@@ -274,7 +317,7 @@ class DarktableMCPServer:
                     "path from each item rather than assuming "
                     "<output_dir>/<stem>.jpg."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "source_dir": {
@@ -335,7 +378,7 @@ class DarktableMCPServer:
                     "A sidecar with no recognisable rating is skipped with an "
                     "error rather than overwritten."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "source_dir": {
@@ -390,7 +433,7 @@ class DarktableMCPServer:
                     "`rating_max=N` (<=), arbitrary `rating_min..rating_max` "
                     "inner ranges, or no filter at all."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "source_dir": {
@@ -438,7 +481,7 @@ class DarktableMCPServer:
                     "written file is <stem>.<format>. Read the real path from "
                     "the `output` field of the .export_images.jsonl side file."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "photo_ids": {

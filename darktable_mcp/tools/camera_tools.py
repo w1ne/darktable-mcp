@@ -8,9 +8,10 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, NamedTuple, TextIO
 
 from ..utils.errors import DarktableMCPError
 
@@ -21,6 +22,53 @@ _MODEL_WORD_RE = re.compile(r"[A-Za-z0-9]{4,}")
 _TAG_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 #: `gphoto2 --get-config serialnumber` prints a `Current: <value>` line.
 _SERIAL_CURRENT_RE = re.compile(r"^Current:\s*(.+?)\s*$", re.MULTILINE)
+#: A serial number is the only thing that makes an identity unique to one
+#: body, and `_camera_identity` spells it `sn_<serial>`. Lower-case on
+#: purpose: a model word like "SN" survives `_model_tag` upper-cased and
+#: must not be mistaken for a serial.
+_IDENTITY_SERIAL_RE = re.compile(r"(?:^|_)sn_[A-Za-z0-9]")
+#: `gphoto2 --list-files` prints one `#<n> <name> <perms> <size> <mime>` line
+#: per file. The name is separated from the rest by 2+ spaces.
+_LIST_FILE_LINE_RE = re.compile(r"^#(\d+)\s+(\S.*?)\s{2,}(.*)$")
+#: First number in the remainder of such a line, with gphoto2's unit suffix.
+#: Real gphoto2 prints KB; older/other builds print raw bytes, so the unit is
+#: optional and "no unit" means bytes.
+_LIST_SIZE_RE = re.compile(r"(\d+)\s*(KB|MB|GB|B)?(?:\s|$)")
+#: gphoto2 announces each file it writes. The path is needed to identify the
+#: one that was in flight when a transfer timed out — that file is truncated.
+_SAVING_AS_RE = re.compile(r"Saving file as\s+(.+?)\s*$")
+
+
+class _CameraFile(NamedTuple):
+    """One entry of `gphoto2 --list-files` for a single camera folder.
+
+    `number` is gphoto2's own 1-based file number within the folder, which
+    is what `--get-file` takes. Not `index`: that name is already a tuple
+    method, and shadowing it on a NamedTuple is a trap. `size_kb` is None when the line carried no
+    parseable size — treated everywhere as "unknown", never as "zero".
+    """
+
+    number: int
+    name: str
+    size_kb: int | None
+
+
+class _FetchResult(NamedTuple):
+    """Outcome of one `gphoto2 --get-*` invocation into the staging area.
+
+    `timeout` is carried rather than raised so the caller can still place
+    the files that did arrive — a timeout that threw away a half-finished
+    transfer would make a card too big for the budget impossible to import
+    at all, however many times it is retried.
+    """
+
+    saved: int
+    skipped: int
+    errors: list[str]
+    last_saved: str | None
+    timeout: subprocess.TimeoutExpired | None
+
+
 #: Words that carry no device identity. gphoto2 calls every USB-Mass-Storage
 #: mount "Mass Storage Camera", so a model made only of these contributes
 #: nothing to a destination tag and is dropped rather than baked in.
@@ -41,28 +89,79 @@ class CameraTools:
     the newcomer vanish — gphoto2's `--skip-existing` and the MSC size
     compare both read it as "already copied" — which is silent data loss.
 
-    Two things prevent that now:
+    Three things prevent that now:
 
     1. The destination tag carries the camera's identity: a sanitised model
        plus, when the body reports one, its serial number. The tag is
        derived only from things that are stable across unplug/replug (never
        from the gphoto2 port, which is reassigned), so re-running into the
        same destination is still a cheap idempotent resume.
-    2. On the MSC path, an existing destination file is only ever treated as
-       "already copied" when it still looks like the same file. Anything
-       else is written under a distinct name; nothing is overwritten.
+    2. On *both* paths, an existing destination file is only ever treated as
+       "already copied" when it still looks like the same file — equal size
+       and equal first/last 8 KB. Anything else is written under a distinct
+       `-2` name and reported; nothing is overwritten, nothing is dropped.
+    3. Nothing is written straight into the destination any more. The PTP
+       path downloads into a private per-run staging directory that cannot
+       collide with anything, and every file is then moved into place
+       through the same never-overwrite decision the MSC path uses. gphoto2's
+       `--skip-existing` is still passed, but it can only ever fire against
+       files this same run just downloaded into that private directory, so
+       it is no longer load-bearing for correctness.
 
-    What is still *not* guaranteed: two bodies of the same model that report
-    no serial number share a tag. On the MSC path point 2 keeps both files
-    regardless. On the PTP path gphoto2's own `--skip-existing` decides, and
-    it compares nothing but the path — see `_download_one_folder`.
+    Two bodies of the same model that report no serial number still share a
+    tag, and therefore a destination directory. That is now handled rather
+    than merely documented: before skipping files that a destination already
+    appears to hold, a weak-identity camera is asked for a small sample of
+    them and the bytes are compared (`_probe_body_identity`). A second body
+    fails that check, so all of its files are fetched and land beside the
+    first body's as `DSC_0001-2.NEF`.
+
+    What is still *not* guaranteed:
+
+    - The sample is bounded (`PROBE_SAMPLE_SIZE`). When a folder holds more
+      candidates than that, a second body whose sampled files happen to be
+      byte-identical to the first body's — same names, same sizes, same
+      content — is not detected, and its differing files in that folder are
+      skipped. When a folder holds no more candidates than the sample size,
+      the check is exhaustive and there is no hole.
+    - The cheap skip rests on the size `gphoto2 --list-files` reports
+      (kilobyte granularity, ±1 KB) plus the sample above. Content is not
+      compared for every file because on PTP reading one byte of a file
+      means downloading all of it.
+    - When `--list-files` cannot be read or parsed, the folder falls back to
+      a full `--get-all-files` pull into staging on every run. That is
+      correct — placement still compares content — but it is not a cheap
+      resume, and the reason is written to the progress log.
+    - Two cameras that report the *same* serial number (a firmware bug)
+      would both be trusted as unique and skip the sample check.
+    - Files are fetched by gphoto2's per-folder file number, which comes
+      from the listing. Shooting onto the card *during* an import can shift
+      those numbers, so the wrong subset gets fetched. Nothing is lost or
+      misfiled by it — each file still arrives under its own name and is
+      placed by content — but files that were missed are reported by name
+      (`_report_missing`) and need another run.
     """
 
     DOWNLOAD_TIMEOUT_DEFAULT = 3600
     LIST_FOLDERS_TIMEOUT = 30
+    LIST_FILES_TIMEOUT = 60
     NUM_FILES_TIMEOUT = 30
     SERIAL_TIMEOUT = 15
     PROGRESS_LOG_NAME = ".import.log"
+    #: Private per-run download area under the destination. Dot-prefixed so
+    #: darktable's own folder import ignores it, and excluded from every
+    #: file count this module makes.
+    STAGING_DIR_NAME = ".import-staging"
+    #: How many already-present-looking files a weak-identity camera is
+    #: asked to re-send so their bytes can be compared with what is already
+    #: in the destination. Small on purpose: this is the price of every
+    #: resume for a body with no serial number. Three is enough to catch a
+    #: different body while costing about one RAW file per folder, because
+    #: the sample is the smallest, the median and the largest candidate.
+    PROBE_SAMPLE_SIZE = 3
+    #: `--list-files` reports sizes in whole kilobytes, and different builds
+    #: round differently, so sizes within this many KB count as equal.
+    SIZE_TOLERANCE_KB = 1
     #: Subdirectory used when the camera folder tree could not be enumerated
     #: and a single recursive download from "/" is used instead.
     ROOT_FOLDER_TAG = "camera"
@@ -239,6 +338,112 @@ class CameraTools:
         return int(match.group(1)) if match else None
 
     @staticmethod
+    def _parse_size_kb(rest: str) -> int | None:
+        """Pull the file size out of the tail of a `--list-files` line.
+
+        Args:
+            rest: everything after the filename, e.g. "rd  9863 KB image/x-nikon-nef".
+
+        Returns:
+            Size in whole kilobytes, or None when the line carries no
+            parseable number. None means "unknown", and every caller treats
+            unknown as "cannot be used to authorise a skip on its own".
+        """
+        match = _LIST_SIZE_RE.search(rest)
+        if not match:
+            return None
+        value = int(match.group(1))
+        unit = match.group(2)
+        if unit == "KB":
+            return value
+        if unit == "MB":
+            return value * 1024
+        if unit == "GB":
+            return value * 1024 * 1024
+        return value // 1024
+
+    def _list_files_in_folder(
+        self, model: str, port: str, src_folder: str
+    ) -> list[_CameraFile] | None:
+        """Enumerate one camera folder's files with their sizes.
+
+        This is what replaced `--skip-existing` as the resume mechanism: it
+        lets us decide *ourselves*, before transferring anything, which
+        files the destination already holds — and, unlike gphoto2's
+        path-only compare, the decision can look at the size and (via
+        `_probe_body_identity`) at the bytes.
+
+        Deliberately total, like `_probe_serial`: every failure mode
+        degrades to None and the caller falls back to pulling the whole
+        folder into staging, which is slower but still cannot lose a file.
+
+        Returns:
+            One `_CameraFile` per line parsed, in gphoto2's own order, or
+            None when the listing could not be obtained or yielded nothing.
+        """
+        env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+        try:
+            result = subprocess.run(
+                [
+                    "gphoto2",
+                    "--camera",
+                    model,
+                    "--port",
+                    port,
+                    "--folder",
+                    src_folder,
+                    "--list-files",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=self.LIST_FILES_TIMEOUT,
+                env=env,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            return None
+
+        if result.returncode != 0:
+            return None
+
+        entries: list[_CameraFile] = []
+        for line in result.stdout.splitlines():
+            match = _LIST_FILE_LINE_RE.match(line.rstrip())
+            if not match:
+                continue
+            entries.append(
+                _CameraFile(
+                    number=int(match.group(1)),
+                    name=match.group(2).strip(),
+                    size_kb=self._parse_size_kb(match.group(3)),
+                )
+            )
+        return entries or None
+
+    @staticmethod
+    def _range_expression(indices: list[int]) -> str:
+        """Collapse gphoto2 file numbers into its `--get-file` RANGE syntax.
+
+        Args:
+            indices: 1-based file numbers, any order.
+
+        Returns:
+            e.g. "1-3,7,9-10". Empty string for an empty selection.
+        """
+        ordered = sorted(set(indices))
+        if not ordered:
+            return ""
+        spans: list[str] = []
+        start = previous = ordered[0]
+        for value in ordered[1:]:
+            if value == previous + 1:
+                previous = value
+                continue
+            spans.append(str(start) if start == previous else f"{start}-{previous}")
+            start = previous = value
+        spans.append(str(start) if start == previous else f"{start}-{previous}")
+        return ",".join(spans)
+
+    @staticmethod
     def _model_tag(model: str) -> str:
         """Sanitise a camera model string into a tag fragment.
 
@@ -334,6 +539,25 @@ class CameraTools:
             parts.append(f"sn_{serial}")
         return "_".join(parts)
 
+    @staticmethod
+    def _identity_is_body_unique(identity: str) -> bool:
+        """Does this identity pick out one physical body, or just a model?
+
+        A serial number does; a model name does not — every other
+        `Nikon_D850` in the world resolves to the same tag, and two of them
+        imported into one destination share a directory. This is the switch
+        that decides whether an "already there" file may be skipped on the
+        strength of its name and size alone, or whether the camera has to
+        prove it with bytes first (`_probe_body_identity`).
+
+        Args:
+            identity: `_camera_identity` output.
+
+        Returns:
+            True only when the identity carries an `sn_<serial>` component.
+        """
+        return bool(_IDENTITY_SERIAL_RE.search(identity or ""))
+
     @classmethod
     def _folder_tag(cls, src_folder: str) -> str:
         """Turn a camera folder path into one filesystem-safe directory name.
@@ -384,82 +608,65 @@ class CameraTools:
         """Destination subdirectory that receives one camera folder's files."""
         return destination / cls._camera_folder_tag(identity, src_folder)
 
-    def _download_one_folder(
+    @staticmethod
+    def _write_log(progress_log: TextIO | None, text: str) -> None:
+        """Append one line to the progress log, if there is one."""
+        if progress_log is None:
+            return
+        progress_log.write(text if text.endswith("\n") else text + "\n")
+        progress_log.flush()
+
+    def _run_gphoto2_get(
         self,
         model: str,
         port: str,
         src_folder: str,
-        destination: Path,
+        selection: list[str],
+        filename_pattern: str,
         timeout_seconds: int,
         progress_log: TextIO | None = None,
         expected_total: int | None = None,
-        identity: str | None = None,
-    ) -> tuple[int, int, list[str]]:
-        """Run gphoto2 to copy all files in a single camera folder.
+        saved_offset: int = 0,
+    ) -> "_FetchResult":
+        """Run one gphoto2 transfer and stream its progress.
 
-        Files land in `<destination>/<identity>_<folder tag>/`, never
-        directly in `destination`: `%f` is the bare basename, so a shared
-        destination would make `100NCD80/DSC_0001.NEF` and
-        `101NCD80/DSC_0001.NEF` collide — and, because the folder path is
-        generic across bodies of the same generation, would do the same to
-        two different cameras imported into one destination.
-        `--skip-existing` would silently drop the newcomer in both cases.
+        `selection` is either `["--get-all-files"]` or
+        `["--get-file", "1-3,7"]`; everything else about the invocation is
+        identical, so both routes get the same locale pinning, the same
+        streamed progress and the same gvfs-lock diagnosis.
 
-        What `--skip-existing` does and does not guarantee: gphoto2 compares
-        *nothing but the target path*. It never looks at size or content. So
-        a skip is safe exactly to the extent that the path is unique to one
-        photo, which is what the `<identity>_<folder tag>` directory buys.
-        The residual hole is two bodies of the same model that both report
-        no serial number: they share an identity, and if both hold a
-        `DSC_0001.NEF` in the same folder path the second one is skipped
-        with no error. Nothing on the PTP path can detect that — gphoto2
-        makes the decision inside its own process, and the post-flight
-        count sees a full destination. Import such bodies into separate
-        destinations. (The MSC path has no such hole; see
-        `_download_from_msc`, which never trusts a path alone.)
+        `--skip-existing` is still passed, but `filename_pattern` always
+        points into a private per-run staging directory, so it can only
+        fire against a file this same run just wrote there. It is a guard
+        against gphoto2 stopping to ask "overwrite?" on stdin, not a
+        correctness mechanism — correctness is `_place_staged_files`.
 
         Streams stdout via Popen + reader threads so per-file progress is
         written to `progress_log` as the transfer happens (the user can
         `tail -f` the log file in another terminal). `--filename %f.%C`
         preserves the file extension.
 
-        When `src_folder` is "/" (folder enumeration failed, so this is one
-        recursive pull of the whole camera) `%F` — gphoto2's own camera
-        folder path — is inserted as well, so the recursion still cannot
-        flatten two folders onto each other.
-
         Args:
             model: gphoto2 model string.
             port: gphoto2 port string.
-            src_folder: camera folder to pull.
-            destination: import root; the per-folder subdirectory is
-                created underneath it.
-            timeout_seconds: subprocess timeout for this folder.
-            progress_log: open text file handle to receive timestamped
-                "Saving file as ..." lines. None to disable logging.
+            src_folder: camera folder to pull from.
+            selection: the "which files" flags, see above.
+            filename_pattern: gphoto2 `--filename` pattern, inside staging.
+            timeout_seconds: subprocess timeout for this transfer.
+            progress_log: open text file handle for progress lines.
             expected_total: if known, formats progress as "(N/total)".
-            identity: camera identity from `_camera_identity`, computed once
-                per camera by the caller so the serial probe is not repeated
-                per folder. None means "derive it from `model` alone", which
-                is the safe fallback for direct callers — never a bare
-                folder tag with no camera in it.
+            saved_offset: number already reported for this folder, so a
+                probe transfer followed by the main one keeps counting up.
 
         Returns:
-            Tuple of (files_saved, files_skipped, error_lines).
+            `_FetchResult`. A timeout is *returned*, not raised, so the
+            caller can still place the files that did arrive before it
+            propagates the failure.
 
         Raises:
             DarktableMCPError: gphoto2 missing or camera locked by another
                 process (gvfs etc.).
-            subprocess.TimeoutExpired: caller handles partial transfers.
         """
-        ident = identity if identity is not None else self._model_tag(model)
-        folder_dest = self._folder_dest(destination, src_folder, ident)
-        folder_dest.mkdir(parents=True, exist_ok=True)
-        if self._folder_tag(src_folder) == self.ROOT_FOLDER_TAG:
-            filename_pattern = f"{folder_dest}/%F/%f.%C"
-        else:
-            filename_pattern = f"{folder_dest}/%f.%C"
-
         cmd = [
             "gphoto2",
             "--camera",
@@ -468,7 +675,7 @@ class CameraTools:
             port,
             "--folder",
             src_folder,
-            "--get-all-files",
+            *selection,
             "--skip-existing",
             "--filename",
             filename_pattern,
@@ -491,6 +698,7 @@ class CameraTools:
 
         counters = {"saved": 0, "skipped": 0}
         stderr_buf: list[str] = []
+        last_saved: list[str] = []
 
         def _consume_stdout() -> None:
             stream = proc.stdout
@@ -500,12 +708,16 @@ class CameraTools:
                 for line in stream:
                     if "Saving file as" in line:
                         counters["saved"] += 1
+                        match = _SAVING_AS_RE.search(line)
+                        if match:
+                            last_saved.append(match.group(1))
                         if progress_log is not None:
                             ts = datetime.now().strftime("%H:%M:%S")
+                            done = saved_offset + counters["saved"]
                             if expected_total:
-                                prefix = f"[{ts}] ({counters['saved']}/{expected_total}) "
+                                prefix = f"[{ts}] ({done}/{expected_total}) "
                             else:
-                                prefix = f"[{ts}] ({counters['saved']}) "
+                                prefix = f"[{ts}] ({done}) "
                             progress_log.write(prefix + line.rstrip("\n") + "\n")
                             progress_log.flush()
                     elif "Skip existing" in line:
@@ -531,23 +743,25 @@ class CameraTools:
         t_out.start()
         t_err.start()
 
+        timeout_exc: subprocess.TimeoutExpired | None = None
         try:
             proc.wait(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
+            timeout_exc = exc
             proc.kill()
             t_out.join(timeout=2)
             t_err.join(timeout=2)
-            raise
 
-        t_out.join(timeout=5)
-        t_err.join(timeout=5)
+        if timeout_exc is None:
+            t_out.join(timeout=5)
+            t_err.join(timeout=5)
 
         saved = counters["saved"]
         skipped = counters["skipped"]
         returncode = proc.returncode if proc.returncode is not None else 0
 
         errors: list[str] = []
-        if returncode != 0:
+        if returncode != 0 and timeout_exc is None:
             errors.extend(line.rstrip() for line in stderr_buf if line.strip())
 
         stderr_lower = "".join(stderr_buf).lower()
@@ -564,7 +778,523 @@ class CameraTools:
                 "or stop gvfs-gphoto2-volume-monitor, then retry."
             )
 
-        return saved, skipped, errors
+        return _FetchResult(
+            saved=saved,
+            skipped=skipped,
+            errors=errors,
+            last_saved=last_saved[-1] if last_saved else None,
+            timeout=timeout_exc,
+        )
+
+    @classmethod
+    def _dest_twins(cls, folder_dest: Path, name: str) -> list[Path]:
+        """Every destination file that could already be a copy of `name`.
+
+        A previous run may have parked a same-named-but-different photo as
+        `DSC_0001-2.NEF`, so "is this file already here?" has to consider
+        the whole `-N` family, not just the camera's own name. Without that,
+        the second body would re-fetch its whole card on every resume and
+        grow a new `-3`, `-4`, ... each time.
+
+        The scan stops at the first gap because `_never_overwrite_target`
+        allocates the suffixes densely. A user who deletes `-2` but keeps
+        `-3` hides the latter from this check, which costs a redundant copy,
+        never a lost one.
+        """
+        twins: list[Path] = []
+        primary = folder_dest / name
+        if primary.exists():
+            twins.append(primary)
+        for index in range(2, cls.MAX_DISTINCT_SUFFIX + 1):
+            candidate = folder_dest / cls._distinct_name(name, index)
+            if not candidate.exists():
+                break
+            twins.append(candidate)
+        return twins
+
+    @classmethod
+    def _destination_holds(cls, folder_dest: Path, entry: _CameraFile) -> bool:
+        """Does the destination look like it already holds this card file?
+
+        "Looks like" is the honest word: this is a name plus a kilobyte-
+        granular size compare, which is all that can be known about a PTP
+        file without downloading it. It is only ever used to *propose* a
+        skip; for a camera whose identity is not unique to one body that
+        proposal still has to survive `_probe_body_identity`.
+        """
+        twins = cls._dest_twins(folder_dest, entry.name)
+        if not twins:
+            return False
+        if entry.size_kb is None:
+            # No size to compare: the name is all we have, which is exactly
+            # what gphoto2's --skip-existing used to decide on.
+            return True
+        for twin in twins:
+            try:
+                if abs(twin.stat().st_size // 1024 - entry.size_kb) <= cls.SIZE_TOLERANCE_KB:
+                    return True
+            except OSError:
+                continue
+        return False
+
+    @classmethod
+    def _probe_sample(cls, present: list[_CameraFile]) -> list[_CameraFile]:
+        """Pick the files a weak-identity camera must re-send to prove itself.
+
+        Smallest, median and largest by reported size: the smallest keeps
+        the check cheap, the largest and the median keep it from being
+        fooled by a folder full of identically-sized sidecars. Deterministic
+        so two runs of the same card probe the same files.
+        """
+        ordered = sorted(present, key=lambda e: (e.size_kb if e.size_kb is not None else 0, e.name))
+        if len(ordered) <= cls.PROBE_SAMPLE_SIZE:
+            return ordered
+        picks = {0, len(ordered) // 2, len(ordered) - 1}
+        return [ordered[i] for i in sorted(picks)]
+
+    def _probe_body_identity(
+        self,
+        model: str,
+        port: str,
+        src_folder: str,
+        present: list[_CameraFile],
+        folder_dest: Path,
+        probe_dir: Path,
+        timeout_seconds: int,
+        progress_log: TextIO | None = None,
+    ) -> tuple[bool, dict[str, Path], list[str]]:
+        """Ask the camera to prove that the destination holds *its* photos.
+
+        This is the fix for the one hole the identity tag cannot close. Two
+        bodies of the same model that report no serial number resolve to the
+        same tag and therefore the same destination directory, and no name,
+        size, folder path or port can tell them apart — the port is
+        reassigned on every re-plug, and the collision usually happens
+        across two runs (two imports into the same
+        `~/Pictures/import-<today>/`), not within one. The only thing that
+        can distinguish them is the bytes, and on PTP getting the bytes
+        means downloading the file. So download a bounded sample of them.
+
+        Args:
+            model: gphoto2 model string.
+            port: gphoto2 port string.
+            src_folder: camera folder being imported.
+            present: the listed files the destination appears to hold.
+            folder_dest: destination subdirectory for this camera folder.
+            probe_dir: private directory the sample is fetched into.
+            timeout_seconds: budget for the sample transfer.
+            progress_log: progress log, for the verdict line.
+
+        Returns:
+            (verified, fetched, errors). `verified` True means every sampled
+            file matched something already in the destination, so the whole
+            `present` set may be skipped without transferring it. False
+            means at least one did not — the destination belongs to another
+            body (or holds truncated files), and the caller must fetch
+            everything. `fetched` maps filename to the already-downloaded
+            copy in `probe_dir` so the caller does not pay for it twice.
+        """
+        sample = self._probe_sample(present)
+        ranges = self._range_expression([entry.number for entry in sample])
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        result = self._run_gphoto2_get(
+            model,
+            port,
+            src_folder,
+            ["--get-file", ranges],
+            f"{probe_dir}/%f.%C",
+            timeout_seconds,
+        )
+        fetched = {path.name: path for path in sorted(probe_dir.iterdir()) if path.is_file()}
+        errors = list(result.errors)
+
+        if not fetched:
+            self._write_log(
+                progress_log,
+                f"   !! could not re-read a sample of {src_folder} to confirm that "
+                f"{folder_dest.name}/ holds this camera's photos; fetching the "
+                f"whole folder instead so nothing can be skipped by mistake",
+            )
+            return False, {}, errors
+
+        unmatched = [
+            name
+            for name, staged in fetched.items()
+            if not any(
+                self._looks_like_same_file(staged, twin)
+                for twin in self._dest_twins(folder_dest, name)
+            )
+        ]
+        if unmatched:
+            self._write_log(
+                progress_log,
+                f"   ** {folder_dest.name}/ already holds different photos under "
+                f"these names ({', '.join(sorted(unmatched)[:3])}) — a second body of "
+                f"the same model with no serial number. Fetching the whole folder; "
+                f"nothing already there will be overwritten.",
+            )
+            return False, fetched, errors
+
+        self._write_log(
+            progress_log,
+            f"   confirmed by sample ({', '.join(sorted(fetched))}): "
+            f"{folder_dest.name}/ already holds this camera's copies of "
+            f"{len(present)} file(s)",
+        )
+        return True, fetched, errors
+
+    def _place_staged_files(
+        self,
+        stage_folder: Path,
+        folder_dest: Path,
+        progress_log: TextIO | None = None,
+    ) -> tuple[int, int, list[str], list[Path]]:
+        """Move a folder's downloaded files into the destination for keeps.
+
+        Every move goes through `_never_overwrite_target`, the same decision
+        the MSC path uses, so a name that is already taken by a *different*
+        photo yields `DSC_0001-2.NEF` instead of an overwrite or a silent
+        skip. Relative subdirectories are preserved, which matters for the
+        `/` fallback where gphoto2's `%F` recreates the camera's own tree.
+
+        Returns:
+            (placed, skipped, messages, unplaced). `skipped` counts files
+            the destination provably already had. `unplaced` are files that
+            could not be moved at all; they are deliberately left in staging
+            rather than discarded, and the caller reports where they are.
+        """
+        placed = 0
+        skipped = 0
+        messages: list[str] = []
+        unplaced: list[Path] = []
+        if not stage_folder.exists():
+            return placed, skipped, messages, unplaced
+
+        for staged in sorted(p for p in stage_folder.rglob("*") if p.is_file()):
+            relative = staged.relative_to(stage_folder)
+            target_dir = folder_dest / relative.parent
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target = self._never_overwrite_target(staged, target_dir)
+                if target is None:
+                    skipped += 1
+                    staged.unlink()
+                    continue
+                shutil.move(str(staged), str(target))
+                placed += 1
+                if target.name != staged.name:
+                    note = (
+                        f"{self.RENAMED_PREFIX} {folder_dest.name}/{staged.name} is a "
+                        f"different file from the one already in the destination; "
+                        f"both kept, the new one as {target.name}"
+                    )
+                    messages.append(note)
+                    self._write_log(progress_log, f"** {note}")
+            except OSError as exc:
+                unplaced.append(staged)
+                messages.append(f"{staged.name}: {exc}")
+                self._write_log(progress_log, f"!! {staged.name}: {exc}")
+        return placed, skipped, messages, unplaced
+
+    def _download_one_folder(
+        self,
+        model: str,
+        port: str,
+        src_folder: str,
+        destination: Path,
+        timeout_seconds: int,
+        progress_log: TextIO | None = None,
+        expected_total: int | None = None,
+        identity: str | None = None,
+    ) -> tuple[int, int, list[str]]:
+        """Copy one camera folder into the destination without losing a file.
+
+        Files end up in `<destination>/<identity>_<folder tag>/`, never
+        directly in `destination`: `%f` is the bare basename, so a shared
+        destination would make `100NCD80/DSC_0001.NEF` and
+        `101NCD80/DSC_0001.NEF` collide — and, because the folder path is
+        generic across bodies of the same generation, would do the same to
+        two different cameras imported into one destination.
+
+        They get there in three steps, none of which trusts a path:
+
+        1. `--list-files` says what the folder holds and how big each file
+           is. Anything the destination already holds under that name at
+           that size (including as a `-2` alternative from an earlier
+           conflict) is a *candidate* to skip, and is not transferred.
+        2. If the camera's identity is not unique to one body — no serial
+           number — the candidates are not taken on trust: a bounded sample
+           is re-downloaded and compared byte-wise with what is on disk
+           (`_probe_body_identity`). A second body fails that check and its
+           whole folder is fetched.
+        3. Everything fetched lands in a private per-run staging directory
+           and is then moved into place by `_place_staged_files`, which
+           never overwrites and never skips a file it cannot recognise.
+
+        This is what replaced trusting `--skip-existing`: gphoto2 compares
+        *nothing but the target path*, decides inside its own process, and
+        reports a skip that looks exactly like a success, so a second body's
+        `DSC_0001.NEF` used to vanish with no error and a full-looking
+        destination. `--skip-existing` is still passed (it stops gphoto2
+        blocking on an interactive overwrite prompt) but it now only ever
+        sees a directory this run created.
+
+        Costs, honestly: a resume for a body that reports a serial number
+        transfers nothing at all — better than before, where gphoto2 still
+        walked every file. A resume for a body with no serial transfers
+        `PROBE_SAMPLE_SIZE` files per folder. When `--list-files` cannot be
+        parsed, or `src_folder` is "/" (the recursive fallback, where the
+        listing does not describe what the pull will produce), the whole
+        folder is re-fetched into staging every run and placement dedupes it
+        by content — correct, but not cheap; the log says so.
+
+        Args:
+            model: gphoto2 model string.
+            port: gphoto2 port string.
+            src_folder: camera folder to pull.
+            destination: import root; the per-folder subdirectory and the
+                staging area are created underneath it.
+            timeout_seconds: overall budget for this folder, covering the
+                listing, the sample and the transfer.
+            progress_log: open text file handle to receive timestamped
+                "Saving file as ..." lines. None to disable logging.
+            expected_total: if known, formats progress as "(N/total)".
+            identity: camera identity from `_camera_identity`, computed once
+                per camera by the caller so the serial probe is not repeated
+                per folder. None means "derive it from `model` alone", which
+                is the safe fallback for direct callers — never a bare
+                folder tag with no camera in it, and never a claim of
+                uniqueness, so the sample check stays on.
+
+        Returns:
+            Tuple of (files_saved, files_skipped, error_lines). `files_saved`
+            counts files that actually landed in the destination, not lines
+            gphoto2 printed.
+
+        Raises:
+            DarktableMCPError: gphoto2 missing or camera locked by another
+                process (gvfs etc.).
+            subprocess.TimeoutExpired: raised *after* the files that did
+                arrive have been placed, so a re-run resumes from there.
+        """
+        ident = identity if identity is not None else self._model_tag(model)
+        # One source for the directory name: the post-flight check in
+        # `_download_from_camera` resolves it the same way, and a second
+        # spelling here would make it count an empty directory.
+        folder_dest = self._folder_dest(destination, src_folder, ident)
+        folder_dest.mkdir(parents=True, exist_ok=True)
+
+        run_dir = destination / self.STAGING_DIR_NAME / f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        stage_folder = run_dir / folder_dest.name
+        stage_folder.mkdir(parents=True, exist_ok=True)
+
+        is_root_pull = self._folder_tag(src_folder) == self.ROOT_FOLDER_TAG
+        pattern = f"{stage_folder}/%F/%f.%C" if is_root_pull else f"{stage_folder}/%f.%C"
+
+        deadline = time.monotonic() + timeout_seconds
+        errors: list[str] = []
+        placed = 0
+        skipped = 0
+        carried = 0
+        timed_out: subprocess.TimeoutExpired | None = None
+
+        try:
+            listing = None if is_root_pull else self._list_files_in_folder(model, port, src_folder)
+            if listing is None:
+                if not is_root_pull:
+                    self._write_log(
+                        progress_log,
+                        f"   (no usable file list for {src_folder}: re-reading the whole "
+                        f"folder this run; files already in the destination are "
+                        f"recognised by content when they are placed)",
+                    )
+                selection: list[str] | None = ["--get-all-files"]
+            else:
+                fetch, skipped, carried, plan_errors = self._plan_folder_fetch(
+                    model,
+                    port,
+                    src_folder,
+                    listing,
+                    folder_dest,
+                    stage_folder,
+                    run_dir / ".probe",
+                    max(1, math.ceil(deadline - time.monotonic())),
+                    ident,
+                    progress_log,
+                )
+                errors.extend(plan_errors)
+                if not fetch:
+                    selection = None
+                elif len(fetch) == len(listing):
+                    selection = ["--get-all-files"]
+                else:
+                    selection = ["--get-file", self._range_expression(fetch)]
+
+            if selection is not None:
+                result = self._run_gphoto2_get(
+                    model,
+                    port,
+                    src_folder,
+                    selection,
+                    pattern,
+                    max(1, math.ceil(deadline - time.monotonic())),
+                    progress_log=progress_log,
+                    expected_total=expected_total,
+                    saved_offset=carried,
+                )
+                errors.extend(result.errors)
+                timed_out = result.timeout
+                if timed_out is not None and result.last_saved:
+                    # The file gphoto2 was writing when the clock ran out is
+                    # truncated. Placing it would put a half photo in the
+                    # destination under the real name, where the next run
+                    # would find it and keep it forever.
+                    partial = Path(result.last_saved)
+                    if partial.is_file() and run_dir in partial.parents:
+                        partial.unlink()
+                        self._write_log(
+                            progress_log,
+                            f"   dropped the partially transferred {partial.name}",
+                        )
+
+            placed, placement_skipped, messages, unplaced = self._place_staged_files(
+                stage_folder, folder_dest, progress_log
+            )
+            skipped += placement_skipped
+            errors.extend(messages)
+
+            if listing is not None:
+                errors.extend(self._report_missing(listing, folder_dest, src_folder, progress_log))
+
+            if unplaced:
+                errors.append(
+                    f"{self.SHORTFALL_PREFIX} {len(unplaced)} file(s) were copied off "
+                    f"the camera but could not be moved into {folder_dest}; they are "
+                    f"still in {stage_folder}"
+                )
+        finally:
+            self._clear_staging(run_dir)
+
+        if timed_out is not None:
+            raise timed_out
+        return placed, skipped, errors
+
+    def _plan_folder_fetch(
+        self,
+        model: str,
+        port: str,
+        src_folder: str,
+        listing: list[_CameraFile],
+        folder_dest: Path,
+        stage_folder: Path,
+        probe_dir: Path,
+        timeout_seconds: int,
+        identity: str,
+        progress_log: TextIO | None = None,
+    ) -> tuple[list[int], int, int, list[str]]:
+        """Decide which of a folder's files actually have to be transferred.
+
+        Returns:
+            (fetch_indices, skipped, carried, errors). `skipped` counts
+            files the destination is trusted to hold already; `carried`
+            counts files the sample check downloaded and left in staging so
+            the main transfer does not pay for them twice.
+        """
+        present = [entry for entry in listing if self._destination_holds(folder_dest, entry)]
+        if not present:
+            return [entry.number for entry in listing], 0, 0, []
+
+        present_numbers = {entry.number for entry in present}
+        if self._identity_is_body_unique(identity):
+            # The serial number makes this directory provably this body's.
+            return (
+                [entry.number for entry in listing if entry.number not in present_numbers],
+                len(present),
+                0,
+                [],
+            )
+
+        verified, fetched, errors = self._probe_body_identity(
+            model,
+            port,
+            src_folder,
+            present,
+            folder_dest,
+            probe_dir,
+            timeout_seconds,
+            progress_log,
+        )
+        if verified:
+            for staged in fetched.values():
+                staged.unlink(missing_ok=True)
+            return (
+                [entry.number for entry in listing if entry.number not in present_numbers],
+                len(present),
+                0,
+                errors,
+            )
+
+        # Another body's photos are in this directory (or the sample could
+        # not be read). Nothing may be skipped on name and size alone; every
+        # file is fetched and `_place_staged_files` decides by content.
+        for name, staged in fetched.items():
+            shutil.move(str(staged), str(stage_folder / name))
+        return (
+            [entry.number for entry in listing if entry.name not in fetched],
+            0,
+            len(fetched),
+            errors,
+        )
+
+    def _report_missing(
+        self,
+        listing: list[_CameraFile],
+        folder_dest: Path,
+        src_folder: str,
+        progress_log: TextIO | None = None,
+    ) -> list[str]:
+        """Name every listed file the destination still does not hold.
+
+        The whole point of the module is that a photo is never lost without
+        the user hearing about it. Everything else here is best effort; this
+        is the check that turns "best effort" into a statement, because it
+        compares what the card said it had against what is on disk after the
+        transfer, per file and by name.
+        """
+        missing = [
+            entry.name for entry in listing if not self._destination_holds(folder_dest, entry)
+        ]
+        if not missing:
+            return []
+        shown = ", ".join(missing[:5])
+        if len(missing) > 5:
+            shown += f", ... ({len(missing) - 5} more)"
+        message = (
+            f"{self.SHORTFALL_PREFIX} {len(missing)} file(s) listed in {src_folder} "
+            f"are still not in {folder_dest.name}/: {shown}"
+        )
+        self._write_log(progress_log, f"!! {message}")
+        return [message]
+
+    def _clear_staging(self, run_dir: Path) -> None:
+        """Remove this run's staging directory, keeping anything unplaced.
+
+        `rmtree` only when the tree holds no files: a file still sitting in
+        staging is a photo that came off the camera and could not be put
+        anywhere, and deleting it is exactly the data loss this module
+        exists to prevent. The caller has already reported where it is.
+        """
+        try:
+            if not run_dir.exists():
+                return
+            if any(p.is_file() for p in run_dir.rglob("*")):
+                return
+            shutil.rmtree(run_dir, ignore_errors=True)
+            parent = run_dir.parent
+            if parent.name == self.STAGING_DIR_NAME and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError:  # pragma: no cover - cleanup is best-effort
+            pass
 
     def _count_files_on_disk(self, destination: Path) -> int:
         """Count files under the destination, recursively, ignoring the log.
@@ -572,13 +1302,19 @@ class CameraTools:
         Recursive because every source folder now gets its own
         subdirectory — a flat `iterdir()` would count zero and make the
         post-flight shortfall check fire on a perfectly good import.
+
+        The staging area is excluded: files in it have not been placed yet,
+        and counting them would let a half-finished transfer paper over a
+        shortfall.
         """
         if not destination.exists():
             return 0
         return sum(
             1
             for entry in destination.rglob("*")
-            if entry.is_file() and entry.name != self.PROGRESS_LOG_NAME
+            if entry.is_file()
+            and entry.name != self.PROGRESS_LOG_NAME
+            and self.STAGING_DIR_NAME not in entry.parts
         )
 
     # ---- USB Mass Storage handling -----------------------------------------
@@ -744,17 +1480,20 @@ class CameraTools:
             return f"{name}-{index}"
         return f"{stem}-{index}{dot}{ext}"
 
-    def _msc_target_path(self, src: Path, sub_dest: Path) -> Path | None:
-        """Decide where one card file may be written, or that it is present.
+    def _never_overwrite_target(self, src: Path, sub_dest: Path) -> Path | None:
+        """Decide where one incoming file may be written, or that it is present.
 
-        The one rule: never overwrite, and never skip, a file that is not
+        Shared by both import paths — the MSC walker copies into it, the PTP
+        path moves staged downloads through it — because both need the same
+        one rule: never overwrite, and never skip, a file that is not
         provably the file we already have. `shutil.copy2` onto an occupied
         path destroys a photo that was already safely on disk — the exact
         failure this whole module is written to prevent — and skipping on a
         bare size match destroys it just as effectively by never copying it.
 
         Args:
-            src: file on the card.
+            src: incoming file — on the card, or already downloaded into the
+                per-run staging directory.
             sub_dest: destination subdirectory for its source folder.
 
         Returns:
@@ -800,7 +1539,7 @@ class CameraTools:
         but a card label is not a device identity — two cards formatted in
         the same body are both `EOS_DIGITAL`, and a single-slot reader
         mounts them at the same path — so the directory is never trusted on
-        its own. Every write goes through `_msc_target_path`, which:
+        its own. Every write goes through `_never_overwrite_target`, which:
 
         - copies when nothing is in the way;
         - skips, counting a skip, when the destination file still looks like
@@ -878,7 +1617,7 @@ class CameraTools:
                     break
                 try:
                     sub_dest.mkdir(parents=True, exist_ok=True)
-                    dst = self._msc_target_path(src, sub_dest)
+                    dst = self._never_overwrite_target(src, sub_dest)
                     if dst is None:
                         skipped += 1
                         continue
@@ -925,6 +1664,9 @@ class CameraTools:
           `<dest>/<camera identity>_<folder tag>/` subdirectory, so
           same-named files from different folders, different cards or
           different bodies cannot overwrite or "skip-existing" each other.
+          Two bodies that share an identity share the subdirectory, and
+          `_download_one_folder` keeps both sets of photos there by
+          comparing bytes rather than paths.
         - During transfer: stream per-file progress to <dest>/.import.log
           so the user can `tail -f` it.
         - `timeout_seconds` is an overall budget for this camera, not a
@@ -938,9 +1680,10 @@ class CameraTools:
           shortfall warning so silent under-copies are visible. It counts
           the identity-prefixed directories this camera actually wrote to,
           so it stays honest when another body imported into the same
-          destination. It cannot see a `--skip-existing` drop between two
-          same-model bodies with no serial number, because such a drop
-          leaves a full destination — see `_download_one_folder`.
+          destination. `_download_one_folder` adds a sharper, per-file
+          version of the same check whenever it could read a file list:
+          every listed name that is still not in the destination is
+          reported by name.
 
         Args:
             model: gphoto2 model string (e.g. "Nikon DSC D800E").
@@ -1107,11 +1850,9 @@ class CameraTools:
         flattening them silently dropped duplicates. The identity is the
         camera model plus its serial number when it reports one; two bodies
         of the same model that report no serial share a subdirectory, and
-        on the PTP path that is the one case where a same-named photo can
-        still be dropped without an error — import such bodies into separate
-        destinations. The USB-Mass-Storage path keeps both regardless: it
-        never overwrites and never skips a file it cannot recognise, writing
-        the newcomer as `IMG_0001-2.CR3` and saying so. Per-file progress is
+        both paths keep both sets of photos in it — neither ever overwrites
+        or skips a file it cannot recognise by content, writing the newcomer
+        as `IMG_0001-2.CR3` and saying so. Per-file progress is
         streamed to a log file inside the destination so long imports can
         be monitored with `tail -f`. Registering the directory with
         darktable's library is left to the user (open darktable, click
@@ -1198,9 +1939,10 @@ class CameraTools:
                 if total_count == 0 and not all_errors:
                     raise DarktableMCPError(
                         f"Camera transfer timed out after {timeout_seconds} s. "
-                        f"Destination {destination} may contain partial files. "
-                        "Re-run the tool to resume — `--skip-existing` is on, "
-                        "so already-copied files are not re-downloaded."
+                        f"Destination {destination} holds everything that was "
+                        "copied before the clock ran out. Re-run the tool to "
+                        "resume — files already in the destination are "
+                        "recognised and not fetched again."
                     ) from exc
                 all_errors.append(f"{entry['model']} ({entry['port']}) timed out")
                 continue

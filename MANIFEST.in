@@ -1,0 +1,16 @@
+# setuptools' sdist defaults pick up `tests/test_*.py` and nothing else under
+# tests/, so the sdist shipped without `tests/__init__.py` and without
+# `tests/lua/test_dispatcher.lua` — the Lua half of the dispatcher suite. The
+# published sdist could not run its own tests: `lua: cannot open
+# tests/lua/test_dispatcher.lua`. Extra sdist files are not expressible in
+# pyproject.toml, so they live here.
+graft tests
+
+# Belt and braces with [tool.setuptools.package-data]: the plugin must be in
+# the wheel or `darktable-mcp install-plugin`, the first thing every user runs,
+# fails on a fresh install.
+recursive-include darktable_mcp/lua *.lua
+
+global-exclude __pycache__ *.py[cod]
+prune .venv
+prune .github

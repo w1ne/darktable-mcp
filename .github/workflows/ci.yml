@@ -11,7 +11,10 @@ on:
   # Weekly run against a fresh dependency resolution. Push/PR builds only prove the
   # code still works against the deps that existed when it was written; the scheduled
   # run is what catches an upstream release breaking us with no commit of our own
-  # (e.g. mcp 2.0.0 dropping the @server.list_tools() / @server.call_tool() decorators).
+  # This is not hypothetical: mcp 2.0.0 dropped the @server.list_tools() /
+  # @server.call_tool() decorators and broke this server on a clean install,
+  # with no commit of ours in between. We have since ported to the 2.x
+  # handlers; the cron is here to catch the next one.
   schedule:
     - cron: '17 4 * * 1'
 

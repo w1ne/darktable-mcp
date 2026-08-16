@@ -40,9 +40,10 @@ class TestDarktableMCPServer:
         async def fake_stdio():
             yield (AsyncMock(), AsyncMock())
 
-        with patch("darktable_mcp.server.stdio_server", fake_stdio), patch.object(
-            server.app, "run", new=AsyncMock(return_value=None)
-        ) as mock_run:
+        with (
+            patch("darktable_mcp.server.stdio_server", fake_stdio),
+            patch.object(server.app, "run", new=AsyncMock(return_value=None)) as mock_run,
+        ):
             await server.start()
             mock_run.assert_called_once()
 
@@ -89,9 +90,7 @@ async def test_handle_view_photos_returns_formatted_list():
     # export_images don't compose.
     assert "/photos/a.NEF" in text
     assert "/photos/b.NEF" in text
-    server.bridge.call.assert_called_once_with(
-        "view_photos", {"filter": "", "limit": 10}
-    )
+    server.bridge.call.assert_called_once_with("view_photos", {"filter": "", "limit": 10})
 
 
 @pytest.mark.asyncio
@@ -147,9 +146,7 @@ async def test_handle_import_batch_returns_count():
     result = await server._handle_import_batch({"source_path": "/path/foo"})
     assert "Imported 12" in result[0].text
     assert "/path/foo" in result[0].text
-    server.bridge.call.assert_called_once_with(
-        "import_batch", {"source_path": "/path/foo"}
-    )
+    server.bridge.call.assert_called_once_with("import_batch", {"source_path": "/path/foo"})
 
 
 @pytest.mark.asyncio
@@ -217,9 +214,12 @@ async def test_handle_apply_preset_returns_applied_count():
     server = DarktableMCPServer()
     server.bridge = Mock()
     server.bridge.call.return_value = {"applied": 3, "missed": [], "preset_name": "myStyle"}
-    result = await server._handle_apply_preset({
-        "photo_ids": ["1", "2", "3"], "preset_name": "myStyle",
-    })
+    result = await server._handle_apply_preset(
+        {
+            "photo_ids": ["1", "2", "3"],
+            "preset_name": "myStyle",
+        }
+    )
     text = result[0].text
     assert "myStyle" in text
     assert "3 photo" in text
@@ -230,11 +230,16 @@ async def test_handle_apply_preset_reports_missed():
     server = DarktableMCPServer()
     server.bridge = Mock()
     server.bridge.call.return_value = {
-        "applied": 1, "missed": ["999"], "preset_name": "myStyle",
+        "applied": 1,
+        "missed": ["999"],
+        "preset_name": "myStyle",
     }
-    result = await server._handle_apply_preset({
-        "photo_ids": ["1", "999"], "preset_name": "myStyle",
-    })
+    result = await server._handle_apply_preset(
+        {
+            "photo_ids": ["1", "999"],
+            "preset_name": "myStyle",
+        }
+    )
     text = result[0].text
     assert "999" in text
     assert "Missed" in text
@@ -247,9 +252,12 @@ async def test_handle_apply_preset_friendly_error_when_dt_not_running():
     server = DarktableMCPServer()
     server.bridge = Mock()
     server.bridge.call.side_effect = BridgeTimeoutError("timeout")
-    result = await server._handle_apply_preset({
-        "photo_ids": ["1"], "preset_name": "x",
-    })
+    result = await server._handle_apply_preset(
+        {
+            "photo_ids": ["1"],
+            "preset_name": "x",
+        }
+    )
     assert "darktable" in result[0].text.lower()
 
 
@@ -271,12 +279,14 @@ async def test_handle_export_images_writes_side_file_and_short_summary(tmp_path)
     server._cli = Mock()
     server._cli.batch_export.return_value = fake_results
 
-    result = await server._handle_export_images({
-        "photo_ids": ["/in/A.NEF", "/in/B.NEF", "/in/C.NEF"],
-        "output_path": str(tmp_path),
-        "format": "jpeg",
-        "quality": 95,
-    })
+    result = await server._handle_export_images(
+        {
+            "photo_ids": ["/in/A.NEF", "/in/B.NEF", "/in/C.NEF"],
+            "output_path": str(tmp_path),
+            "format": "jpeg",
+            "quality": 95,
+        }
+    )
     text = result[0].text
 
     # Summary stays compact: counts + side file pointer + first error.
@@ -320,11 +330,13 @@ async def test_handle_export_images_trusts_ok_not_the_output_string(tmp_path):
         ),
     ]
 
-    result = await server._handle_export_images({
-        "photo_ids": ["/in/A.NEF"],
-        "output_path": str(tmp_path),
-        "format": "jpeg",
-    })
+    result = await server._handle_export_images(
+        {
+            "photo_ids": ["/in/A.NEF"],
+            "output_path": str(tmp_path),
+            "format": "jpeg",
+        }
+    )
     assert "exported: 1, failed: 0" in result[0].text
 
 
@@ -347,11 +359,13 @@ async def test_handle_export_images_offloads_the_batch(tmp_path):
     server._cli = Mock()
     server._cli.batch_export.side_effect = slow_batch_export
 
-    await server._handle_export_images({
-        "photo_ids": ["/in/A.NEF"],
-        "output_path": str(tmp_path),
-        "format": "jpeg",
-    })
+    await server._handle_export_images(
+        {
+            "photo_ids": ["/in/A.NEF"],
+            "output_path": str(tmp_path),
+            "format": "jpeg",
+        }
+    )
     assert seen["thread"] != loop_thread, "batch_export ran on the event loop thread"
 
 
@@ -376,13 +390,15 @@ async def test_handle_export_images_threads_max_dimensions_through(tmp_path):
         ExportResult(input="/in/A.NEF", output=f"{tmp_path}/A.jpg", ok=True, error=None),
     ]
 
-    await server._handle_export_images({
-        "photo_ids": ["/in/A.NEF"],
-        "output_path": str(tmp_path),
-        "format": "jpeg",
-        "max_width": 2048,
-        "max_height": 1536,
-    })
+    await server._handle_export_images(
+        {
+            "photo_ids": ["/in/A.NEF"],
+            "output_path": str(tmp_path),
+            "format": "jpeg",
+            "max_width": 2048,
+            "max_height": 1536,
+        }
+    )
     kwargs = server._cli.batch_export.call_args.kwargs
     assert kwargs["max_width"] == 2048
     assert kwargs["max_height"] == 1536
@@ -398,11 +414,13 @@ async def test_handle_export_images_defaults_max_dimensions_to_none(tmp_path):
         ExportResult(input="/in/A.NEF", output=f"{tmp_path}/A.jpg", ok=True, error=None),
     ]
 
-    await server._handle_export_images({
-        "photo_ids": ["/in/A.NEF"],
-        "output_path": str(tmp_path),
-        "format": "jpeg",
-    })
+    await server._handle_export_images(
+        {
+            "photo_ids": ["/in/A.NEF"],
+            "output_path": str(tmp_path),
+            "format": "jpeg",
+        }
+    )
     kwargs = server._cli.batch_export.call_args.kwargs
     assert kwargs["max_width"] is None
     assert kwargs["max_height"] is None
@@ -462,7 +480,7 @@ class TestBridgeErrorMappingIsSharedOnce:
         from darktable_mcp import server as server_module
 
         source = inspect.getsource(server_module)
-        assert source.count("darktable-mcp install-plugin\",") == 1
+        assert source.count('darktable-mcp install-plugin",') == 1
         assert source.count("bridge timeout") == 1
         assert source.count('text=f"Plugin error: {e}"') == 1
 
@@ -493,7 +511,7 @@ class TestBridgeErrorMappingIsSharedOnce:
 
 @pytest.mark.asyncio
 async def test_timeout_message_names_the_budget_and_both_causes():
-    """"darktable not running" was a lie for a slow-but-alive call. The text
+    """ "darktable not running" was a lie for a slow-but-alive call. The text
     must name the budget that elapsed and offer both explanations."""
     from darktable_mcp.bridge.client import DEFAULT_TIMEOUTS, BridgeTimeoutError
 
@@ -579,8 +597,9 @@ async def test_handle_extract_previews_offloads():
         seen["thread"] = threading.get_ident()
         return {"items": [], "count": 0}
 
-    with patch("darktable_mcp.server.extract_previews", side_effect=slow_extract), patch(
-        "darktable_mcp.server.format_extract_summary", return_value="done"
+    with (
+        patch("darktable_mcp.server.extract_previews", side_effect=slow_extract),
+        patch("darktable_mcp.server.format_extract_summary", return_value="done"),
     ):
         server = DarktableMCPServer()
         result = await server._handle_extract_previews({"source_dir": "/raws"})
@@ -600,8 +619,9 @@ async def test_handle_apply_ratings_batch_offloads():
         seen["thread"] = threading.get_ident()
         return {"written": 1}
 
-    with patch("darktable_mcp.server.apply_ratings_batch", side_effect=slow_apply), patch(
-        "darktable_mcp.server.format_ratings_summary", return_value="done"
+    with (
+        patch("darktable_mcp.server.apply_ratings_batch", side_effect=slow_apply),
+        patch("darktable_mcp.server.format_ratings_summary", return_value="done"),
     ):
         server = DarktableMCPServer()
         result = await server._handle_apply_ratings_batch(
@@ -623,8 +643,9 @@ async def test_handle_open_in_darktable_offloads():
         seen["thread"] = threading.get_ident()
         return {"launched": True}
 
-    with patch("darktable_mcp.server.open_in_darktable", side_effect=slow_open), patch(
-        "darktable_mcp.server.format_open_summary", return_value="done"
+    with (
+        patch("darktable_mcp.server.open_in_darktable", side_effect=slow_open),
+        patch("darktable_mcp.server.format_open_summary", return_value="done"),
     ):
         server = DarktableMCPServer()
         result = await server._handle_open_in_darktable({"source_dir": "/raws"})

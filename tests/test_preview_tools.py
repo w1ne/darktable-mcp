@@ -100,9 +100,7 @@ class TestApplyRatingsBatch:
 
     def test_missing_raw_reported_per_item(self, tmp_path: Path) -> None:
         _touch(tmp_path / "DSC_0004.NEF")
-        result = apply_ratings_batch(
-            tmp_path, {"DSC_0004": 3, "DSC_NOPE": 4}, log=False
-        )
+        result = apply_ratings_batch(tmp_path, {"DSC_0004": 3, "DSC_NOPE": 4}, log=False)
         assert result["applied"] == 1
         assert result["errors"] == 1
         bad = next(it for it in result["items"] if it["stem"] == "DSC_NOPE")
@@ -112,9 +110,7 @@ class TestApplyRatingsBatch:
         _touch(tmp_path / "IMG_0001.cr2")
         _touch(tmp_path / "DSCF1234.RAF")
 
-        result = apply_ratings_batch(
-            tmp_path, {"IMG_0001": 4, "DSCF1234": 5}, log=False
-        )
+        result = apply_ratings_batch(tmp_path, {"IMG_0001": 4, "DSCF1234": 5}, log=False)
         assert result["applied"] == 2
         assert (tmp_path / "IMG_0001.cr2.xmp").exists()
         assert (tmp_path / "DSCF1234.RAF.xmp").exists()
@@ -392,9 +388,7 @@ class TestExtractPreviews:
         assert side.exists()
         assert side.read_text() == ""
 
-    def test_side_file_has_one_jsonl_line_per_item(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_side_file_has_one_jsonl_line_per_item(self, tmp_path: Path, monkeypatch) -> None:
         """The full per-file detail moved out of the function's return into a
         JSONL side file. Verify the file is exactly one parseable line per item.
 
@@ -405,9 +399,7 @@ class TestExtractPreviews:
         from darktable_mcp.tools import preview_tools as pt
 
         # Stub the vision libs so the function can run without rawpy/PIL.
-        monkeypatch.setattr(
-            pt, "_import_vision_libs", lambda: (None, None, None, None)
-        )
+        monkeypatch.setattr(pt, "_import_vision_libs", lambda: (None, None, None, None))
         # Empty source dir → items list will be []; we need at least one fake
         # raw to exercise the per-file write path. Easiest: run twice — once
         # to produce an empty side file (covered above), and a second pass
@@ -420,9 +412,9 @@ class TestExtractPreviews:
         # recorded with an error — that's still a valid per-item record.
         result = pt.extract_previews(tmp_path)
         side = Path(result["side_file"])
-        lines = [json.loads(l) for l in side.read_text().splitlines()]
+        lines = [json.loads(line) for line in side.read_text().splitlines()]
         assert len(lines) == 2
-        assert {l["stem"] for l in lines} == {"DSC_0001", "DSC_0002"}
+        assert {line["stem"] for line in lines} == {"DSC_0001", "DSC_0002"}
         # Each line should be a complete record with the expected keys.
         for entry in lines:
             assert {"stem", "source", "preview", "exif", "size", "error"} <= entry.keys()
@@ -582,9 +574,7 @@ class TestThumbnailFormats:
         assert len(image_mod.open_calls) == 1
         assert Path(result["items"][0]["preview"]).exists()
 
-    def test_bitmap_thumb_goes_through_image_fromarray(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_bitmap_thumb_goes_through_image_fromarray(self, tmp_path: Path, monkeypatch) -> None:
         # rawpy returns a numpy ndarray for ThumbFormat.BITMAP — Image.open
         # would choke on it, so it must take the fromarray path instead.
         rawpy_mod = _FakeRawpyModule(fmt=_FakeRawpyModule.ThumbFormat.BITMAP)
@@ -601,9 +591,7 @@ class TestThumbnailFormats:
         assert image_mod.open_calls == []  # never fed an ndarray
         assert item["size"] == [320, 240]
 
-    def test_bitmap_thumb_still_writes_the_small_thumb(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_bitmap_thumb_still_writes_the_small_thumb(self, tmp_path: Path, monkeypatch) -> None:
         rawpy_mod = _FakeRawpyModule(fmt=_FakeRawpyModule.ThumbFormat.BITMAP)
         _install_fake_vision(monkeypatch, rawpy_mod)
         (tmp_path / "DSC_0003.NEF").write_bytes(b"raw")
@@ -622,8 +610,18 @@ class TestRawExtensionMatching:
         from darktable_mcp.tools.preview_tools import RAW_EXTENSIONS
 
         assert all(ext == ext.lower() for ext in RAW_EXTENSIONS)
-        assert {".srw", ".nrw", ".rwl", ".erf", ".mrw", ".x3f", ".iiq", ".3fr",
-                ".kdc", ".mos"} <= set(RAW_EXTENSIONS)
+        assert {
+            ".srw",
+            ".nrw",
+            ".rwl",
+            ".erf",
+            ".mrw",
+            ".x3f",
+            ".iiq",
+            ".3fr",
+            ".kdc",
+            ".mos",
+        } <= set(RAW_EXTENSIONS)
 
     def test_find_raws_matches_regardless_of_case(self, tmp_path: Path) -> None:
         from darktable_mcp.tools.preview_tools import _find_raws_for_stem
@@ -634,16 +632,24 @@ class TestRawExtensionMatching:
 
         assert [p.name for p in found] == ["DSC_9999.NeF"]
 
-    def test_mixed_case_and_extra_formats_are_discovered(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_mixed_case_and_extra_formats_are_discovered(self, tmp_path: Path, monkeypatch) -> None:
         _install_fake_vision(monkeypatch, _FakeRawpyModule())
         names = [
-            "a.NEF", "b.nef", "c.Nef",       # case must not matter
-            "d.Cr2", "e.ARW", "f.srw",       # Samsung
-            "g.nrw", "h.rwl", "i.erf",
-            "j.mrw", "k.x3f", "l.iiq",
-            "m.3fr", "n.kdc", "o.mos",
+            "a.NEF",
+            "b.nef",
+            "c.Nef",  # case must not matter
+            "d.Cr2",
+            "e.ARW",
+            "f.srw",  # Samsung
+            "g.nrw",
+            "h.rwl",
+            "i.erf",
+            "j.mrw",
+            "k.x3f",
+            "l.iiq",
+            "m.3fr",
+            "n.kdc",
+            "o.mos",
         ]
         for name in names:
             (tmp_path / name).write_bytes(b"raw")
@@ -681,7 +687,10 @@ class TestParallelExtraction:
         result = extract_previews(tmp_path, thumb_dim=0, max_workers=4)
 
         assert [it["stem"] for it in result["items"]] == [
-            "DSC_0001", "DSC_0002", "DSC_0003", "DSC_0004",
+            "DSC_0001",
+            "DSC_0002",
+            "DSC_0003",
+            "DSC_0004",
         ]
         # The JSONL side file follows the same order.
         raw_lines = Path(result["side_file"]).read_text().splitlines()
@@ -782,9 +791,7 @@ class TestRecursiveExtraction:
         assert [it["stem"] for it in result["items"]] == ["DSC_0001", "DSC_0001"]
         assert len({it["source"] for it in result["items"]}) == 2
 
-    def test_recursive_items_stay_in_sorted_path_order(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_recursive_items_stay_in_sorted_path_order(self, tmp_path: Path, monkeypatch) -> None:
         delays = {"DSC_0001": 0.15, "DSC_0002": 0.0}
         _install_fake_vision(monkeypatch, _FakeRawpyModule(delays=delays))
         for card in ("card_b", "card_a"):
@@ -817,9 +824,7 @@ class TestRecursiveExtraction:
         assert second["extracted"] == 0
         assert "STRAY_0001" not in {it["stem"] for it in second["items"]}
 
-    def test_custom_output_dir_inside_source_is_excluded(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_custom_output_dir_inside_source_is_excluded(self, tmp_path: Path, monkeypatch) -> None:
         # A non-dot output_dir under source_dir would otherwise be re-scanned.
         _install_fake_vision(monkeypatch, _FakeRawpyModule())
         (tmp_path / "card_a").mkdir()
@@ -1282,9 +1287,7 @@ class TestLaunchVerification:
         # A hung child we spawned is ours to clean up.
         assert proc.killed is True
 
-    def test_lock_notice_with_clean_exit_reports_handoff(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_lock_notice_with_clean_exit_reports_handoff(self, tmp_path: Path, monkeypatch) -> None:
         """The Linux case: the handoff succeeds and the images open in the running window."""
         proc = _FakePopen(
             exit_code=0,
@@ -1314,9 +1317,7 @@ class TestLaunchVerification:
         # The captured output is surfaced, not swallowed.
         assert "some other startup failure" in message
 
-    def test_immediate_exit_zero_also_reports_failure(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_immediate_exit_zero_also_reports_failure(self, tmp_path: Path, monkeypatch) -> None:
         # darktable can bail with status 0 too; a dead child is a dead child.
         self._patch(monkeypatch, _FakePopen(exit_code=0))
 

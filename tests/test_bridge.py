@@ -156,9 +156,7 @@ def test_call_cleans_up_request_file_on_timeout(cache_dir, fake_plugin_lua_file)
 
 
 def test_call_cleans_up_response_file_on_success(cache_dir, fake_plugin_lua_file):
-    plugin = FakePlugin(
-        cache_dir, lambda req: {"id": req["id"], "result": "ok"}
-    )
+    plugin = FakePlugin(cache_dir, lambda req: {"id": req["id"], "result": "ok"})
     plugin.start()
     try:
         bridge = Bridge()
@@ -215,9 +213,7 @@ def test_call_applies_the_fallback_for_unknown_methods(
         bridge.call("no_such_method", {})
 
 
-def test_timeout_message_names_the_method_and_the_budget_used(
-    cache_dir, fake_plugin_lua_file
-):
+def test_timeout_message_names_the_method_and_the_budget_used(cache_dir, fake_plugin_lua_file):
     bridge = Bridge()
     with pytest.raises(BridgeTimeoutError) as exc:
         bridge.call("import_batch", {}, timeout=0.4)

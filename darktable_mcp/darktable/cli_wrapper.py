@@ -9,7 +9,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
 
 from ..utils.errors import DarktableNotFoundError, ExportError
 
@@ -64,9 +63,9 @@ class ExportResult:
     """Outcome of exporting one file."""
 
     input: str
-    output: Optional[str]
+    output: str | None
     ok: bool
-    error: Optional[str]
+    error: str | None
 
 
 class CLIWrapper:
@@ -87,8 +86,8 @@ class CLIWrapper:
 
     def __init__(
         self,
-        darktable_cli_path: Optional[str] = None,
-        configdir: Optional[Path] = None,
+        darktable_cli_path: str | None = None,
+        configdir: Path | None = None,
     ):
         """Initialize the CLI wrapper.
 
@@ -218,8 +217,8 @@ class CLIWrapper:
         output_path: Path,
         format_type: str = "jpeg",
         quality: int = 95,
-        max_width: Optional[int] = None,
-        max_height: Optional[int] = None,
+        max_width: int | None = None,
+        max_height: int | None = None,
         timeout: int = EXPORT_TIMEOUT_DEFAULT,
     ) -> Path:
         """Export an image using darktable-cli.
@@ -325,10 +324,10 @@ class CLIWrapper:
 
     @staticmethod
     def _plan_output_paths(
-        input_files: List[Path],
+        input_files: list[Path],
         output_dir: Path,
         format_type: str,
-    ) -> List[Path]:
+    ) -> list[Path]:
         """Assign one distinct output path per input, in input order.
 
         Two inputs from different source folders can share a stem
@@ -347,7 +346,7 @@ class CLIWrapper:
         """
         ext = _output_extension(format_type)
         taken = set()
-        planned: List[Path] = []
+        planned: list[Path] = []
 
         for input_file in input_files:
             stem = input_file.stem
@@ -370,15 +369,15 @@ class CLIWrapper:
 
     def batch_export(
         self,
-        input_files: List[Path],
+        input_files: list[Path],
         output_dir: Path,
         format_type: str = "jpeg",
         quality: int = 95,
-        max_width: Optional[int] = None,
-        max_height: Optional[int] = None,
-        max_workers: Optional[int] = None,
+        max_width: int | None = None,
+        max_height: int | None = None,
+        max_workers: int | None = None,
         timeout: int = EXPORT_TIMEOUT_DEFAULT,
-    ) -> List[ExportResult]:
+    ) -> list[ExportResult]:
         """Export multiple images in batch, in parallel.
 
         Each export boots a full darktable core, so the work is
@@ -414,7 +413,7 @@ class CLIWrapper:
         planned = self._plan_output_paths(input_files, output_dir, format_type)
 
         workers = max_workers if max_workers and max_workers > 0 else min(4, os.cpu_count() or 1)
-        results: List[Optional[ExportResult]] = [None] * len(input_files)
+        results: list[ExportResult | None] = [None] * len(input_files)
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
@@ -443,8 +442,8 @@ class CLIWrapper:
         output_file: Path,
         format_type: str,
         quality: int,
-        max_width: Optional[int] = None,
-        max_height: Optional[int] = None,
+        max_width: int | None = None,
+        max_height: int | None = None,
         timeout: int = EXPORT_TIMEOUT_DEFAULT,
     ) -> ExportResult:
         """Export a single file, converting any failure into an ExportResult.

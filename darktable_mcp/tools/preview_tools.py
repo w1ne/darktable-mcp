@@ -18,9 +18,10 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any
 
 from ..utils.errors import DarktableMCPError
 
@@ -30,30 +31,45 @@ logger = logging.getLogger(__name__)
 # against this set, never `p.suffix`. A `.Nef` is a NEF.
 RAW_EXTENSIONS = frozenset(
     {
-        ".nef", ".nrw",           # Nikon
-        ".cr2", ".cr3", ".crw",   # Canon
-        ".arw", ".srf", ".sr2",   # Sony
-        ".raf",                   # Fujifilm
-        ".rw2",                   # Panasonic
-        ".dng",                   # Adobe / generic
-        ".orf",                   # Olympus
-        ".pef",                   # Pentax
-        ".srw",                   # Samsung
-        ".rwl",                   # Leica
-        ".erf",                   # Epson
-        ".mrw",                   # Minolta
-        ".x3f",                   # Sigma
-        ".iiq",                   # Phase One
-        ".3fr", ".fff",           # Hasselblad
-        ".kdc", ".dcr",           # Kodak
-        ".mos",                   # Leaf
+        ".nef",
+        ".nrw",  # Nikon
+        ".cr2",
+        ".cr3",
+        ".crw",  # Canon
+        ".arw",
+        ".srf",
+        ".sr2",  # Sony
+        ".raf",  # Fujifilm
+        ".rw2",  # Panasonic
+        ".dng",  # Adobe / generic
+        ".orf",  # Olympus
+        ".pef",  # Pentax
+        ".srw",  # Samsung
+        ".rwl",  # Leica
+        ".erf",  # Epson
+        ".mrw",  # Minolta
+        ".x3f",  # Sigma
+        ".iiq",  # Phase One
+        ".3fr",
+        ".fff",  # Hasselblad
+        ".kdc",
+        ".dcr",  # Kodak
+        ".mos",  # Leaf
     }
 )
 
 # Preference order when several raws share one stem (e.g. an in-camera DNG
 # next to the native NEF). Anything not listed sorts after these, by name.
 RAW_EXTENSION_PREFERENCE = (
-    ".nef", ".cr3", ".cr2", ".arw", ".raf", ".rw2", ".orf", ".pef", ".dng",
+    ".nef",
+    ".cr3",
+    ".cr2",
+    ".arw",
+    ".raf",
+    ".rw2",
+    ".orf",
+    ".pef",
+    ".dng",
 )
 
 ISO_KEYS = (
@@ -101,9 +117,9 @@ _UNRECOGNISED_SIDECAR = (
 def _import_vision_libs():
     """Lazy-import the optional [vision] deps with a helpful error."""
     try:
+        import pyexiv2  # type: ignore[import-untyped]
         import rawpy  # type: ignore[import-untyped]
         from PIL import Image, ImageOps  # type: ignore[import-untyped]
-        import pyexiv2  # type: ignore[import-untyped]
     except ImportError as exc:
         raise DarktableMCPError(
             "Vision-rating tools require optional deps. Install with: "
@@ -113,7 +129,7 @@ def _import_vision_libs():
     return rawpy, Image, ImageOps, pyexiv2
 
 
-def _coerce_iso(value: Any) -> Optional[int]:
+def _coerce_iso(value: Any) -> int | None:
     """Coerce a raw EXIF ISO value into a sensible int; return None if unusable."""
     if value is None:
         return None
@@ -122,7 +138,7 @@ def _coerce_iso(value: Any) -> Optional[int]:
             return None
         value = value[0]
     if isinstance(value, str):
-        nums: List[int] = []
+        nums: list[int] = []
         for part in value.replace("/", " ").split():
             try:
                 nums.append(int(part))
@@ -137,7 +153,7 @@ def _coerce_iso(value: Any) -> Optional[int]:
     return n if 50 <= n <= 102400 else None
 
 
-def _parse_rational(value: Any) -> Optional[float]:
+def _parse_rational(value: Any) -> float | None:
     """Parse pyexiv2 'a/b' rational-string into float."""
     if value is None:
         return None
@@ -156,9 +172,9 @@ def _parse_rational(value: Any) -> Optional[float]:
         return None
 
 
-def _read_exif_summary(pyexiv2_mod: Any, raw_path: Path) -> Dict[str, Any]:
+def _read_exif_summary(pyexiv2_mod: Any, raw_path: Path) -> dict[str, Any]:
     """Read a small, useful EXIF summary from a raw file."""
-    summary: Dict[str, Any] = {
+    summary: dict[str, Any] = {
         "iso": None,
         "shutter": None,
         "focal_mm": None,
@@ -186,18 +202,14 @@ def _read_exif_summary(pyexiv2_mod: Any, raw_path: Path) -> Dict[str, Any]:
                 summary["iso"] = iso
                 break
 
-    summary["shutter"] = exif.get("Exif.Photo.ExposureTime") or exif.get(
-        "Exif.Image.ExposureTime"
-    )
+    summary["shutter"] = exif.get("Exif.Photo.ExposureTime") or exif.get("Exif.Image.ExposureTime")
     summary["focal_mm"] = _parse_rational(exif.get("Exif.Photo.FocalLength"))
     summary["aperture"] = _parse_rational(exif.get("Exif.Photo.FNumber"))
-    summary["datetime"] = exif.get("Exif.Photo.DateTimeOriginal") or exif.get(
-        "Exif.Image.DateTime"
-    )
+    summary["datetime"] = exif.get("Exif.Photo.DateTimeOriginal") or exif.get("Exif.Image.DateTime")
     return summary
 
 
-def _raw_sort_key(path: Path) -> Tuple[int, str]:
+def _raw_sort_key(path: Path) -> tuple[int, str]:
     """Sort key ranking raws by format preference, then by filename."""
     ext = path.suffix.lower()
     try:
@@ -215,7 +227,7 @@ def _is_within(path: Path, base: Path) -> bool:
         return False
 
 
-def _iter_raw_files(source_dir: Path, exclude: Optional[Path] = None) -> List[Path]:
+def _iter_raw_files(source_dir: Path, exclude: Path | None = None) -> list[Path]:
     """Recursively list the raw files under ``source_dir``, in sorted path order.
 
     ``import_from_camera`` writes one subdirectory per camera folder / card
@@ -231,7 +243,7 @@ def _iter_raw_files(source_dir: Path, exclude: Optional[Path] = None) -> List[Pa
     except OSError as exc:
         raise DarktableMCPError(f"cannot scan source_dir {source_dir}: {exc}") from exc
 
-    matches: List[Path] = []
+    matches: list[Path] = []
     for path in entries:
         if path.suffix.lower() not in RAW_EXTENSIONS:
             continue
@@ -249,26 +261,26 @@ def _iter_raw_files(source_dir: Path, exclude: Optional[Path] = None) -> List[Pa
     return sorted(matches, key=lambda p: p.parts)
 
 
-def _raw_lookup_keys(source_dir: Path, path: Path) -> List[str]:
+def _raw_lookup_keys(source_dir: Path, path: Path) -> list[str]:
     """Keys a caller may use for ``path``: the bare stem and the relative path."""
     rel_key = path.relative_to(source_dir).with_suffix("").as_posix()
     return [path.stem] if rel_key == path.stem else [path.stem, rel_key]
 
 
-def _index_raws(source_dir: Path, exclude: Optional[Path] = None) -> Dict[str, List[Path]]:
+def _index_raws(source_dir: Path, exclude: Path | None = None) -> dict[str, list[Path]]:
     """Index the raws under ``source_dir`` by bare stem AND by relative path.
 
     Built once per batch: a per-stem ``rglob`` would rescan the whole tree for
     every one of several hundred ratings.
     """
-    index: Dict[str, List[Path]] = {}
+    index: dict[str, list[Path]] = {}
     for path in _iter_raw_files(source_dir, exclude=exclude):
         for key in _raw_lookup_keys(source_dir, path):
             index.setdefault(key, []).append(path)
     return index
 
 
-def _lookup_raws(index: Mapping[str, List[Path]], key: str) -> List[Path]:
+def _lookup_raws(index: Mapping[str, list[Path]], key: str) -> list[Path]:
     """Resolve a ratings key (bare stem or source-relative path) to raw paths."""
     normalized = Path(key).as_posix().lstrip("/")
     if normalized.startswith("./"):
@@ -280,7 +292,7 @@ def _lookup_raws(index: Mapping[str, List[Path]], key: str) -> List[Path]:
     return sorted(matches, key=_raw_sort_key) if matches else []
 
 
-def _find_raws_for_stem(source_dir: Path, stem: str) -> List[Path]:
+def _find_raws_for_stem(source_dir: Path, stem: str) -> list[Path]:
     """List every raw under ``source_dir`` matching ``stem``, best candidate first.
 
     ``stem`` is either a bare stem (``DSC_1234``) or a path relative to
@@ -294,7 +306,7 @@ def _find_raws_for_stem(source_dir: Path, stem: str) -> List[Path]:
     return _lookup_raws(_index_raws(source_dir), stem)
 
 
-def _resolve_raw_for_stem(source_dir: Path, stem: str) -> Optional[Path]:
+def _resolve_raw_for_stem(source_dir: Path, stem: str) -> Path | None:
     """Find the best raw for ``stem`` under ``source_dir`` (recursive, case-insensitive)."""
     matches = _find_raws_for_stem(source_dir, stem)
     return matches[0] if matches else None
@@ -339,7 +351,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     gets ``_NEW_FILE_MODE``. Never touches the process umask.
     """
     try:
-        mode: Optional[int] = path.stat().st_mode & 0o777
+        mode: int | None = path.stat().st_mode & 0o777
     except OSError:
         mode = None
 
@@ -359,7 +371,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         raise
 
 
-def _patch_rating(existing: bytes, rating: int) -> Optional[bytes]:
+def _patch_rating(existing: bytes, rating: int) -> bytes | None:
     """Rewrite only the rating value inside an existing sidecar.
 
     Returns the patched bytes (everything else byte-identical), or None when no
@@ -368,9 +380,7 @@ def _patch_rating(existing: bytes, rating: int) -> Optional[bytes]:
     """
     value = str(rating).encode("ascii")
     for pattern in (_RATING_ELEMENT_RE, _RATING_ATTR_RE):
-        patched, count = pattern.subn(
-            lambda m: m.group(1) + value + m.group(3), existing, count=1
-        )
+        patched, count = pattern.subn(lambda m: m.group(1) + value + m.group(3), existing, count=1)
         if count:
             return patched
     return None
@@ -410,12 +420,12 @@ def _default_workers() -> int:
 
 def extract_previews(
     source_dir: str | Path,
-    output_dir: Optional[str | Path] = None,
+    output_dir: str | Path | None = None,
     max_dim: int = 1024,
     thumb_dim: int = 384,
     overwrite: bool = False,
-    max_workers: Optional[int] = None,
-) -> Dict[str, Any]:
+    max_workers: int | None = None,
+) -> dict[str, Any]:
     """Extract auto-rotated JPEG previews from raw files for vision rating.
 
     For each raw file in ``source_dir``:
@@ -453,7 +463,8 @@ def extract_previews(
     disambiguate. Per-file errors are reported per-item, never raised — one
     bad raw can't sink the batch.
     """
-    rawpy, Image, ImageOps, pyexiv2 = _import_vision_libs()
+    # N806: Image/ImageOps are PIL classes, so CapWords is their real name.
+    rawpy, Image, ImageOps, pyexiv2 = _import_vision_libs()  # noqa: N806
 
     src = Path(source_dir).expanduser().resolve()
     if not src.is_dir():
@@ -473,18 +484,16 @@ def extract_previews(
 
     raws = _iter_raw_files(src, exclude=out_dir)
 
-    def _extract_one(raw: Path) -> Tuple[Dict[str, Any], str]:
+    def _extract_one(raw: Path) -> tuple[dict[str, Any], str]:
         """Extract one raw. Returns (item, status) with status in extracted/skipped/error."""
         # Mirror the source tree under the output dir. Camera filenames repeat
         # across folders and cards, so a flat `<out_dir>/<stem>.jpg` would let
         # `a/DSC_0001.NEF` and `b/DSC_0001.NEF` silently overwrite each other.
         rel_parent = raw.parent.relative_to(src)
         out_path = out_dir / rel_parent / f"{raw.stem}.jpg"
-        thumb_path = (
-            thumb_dir / rel_parent / f"{raw.stem}.jpg" if thumb_dir is not None else None
-        )
+        thumb_path = thumb_dir / rel_parent / f"{raw.stem}.jpg" if thumb_dir is not None else None
 
-        item: Dict[str, Any] = {
+        item: dict[str, Any] = {
             "stem": raw.stem,
             "rel_path": raw.relative_to(src).as_posix(),
             "source": str(raw),
@@ -555,8 +564,7 @@ def extract_previews(
                 fh.write(json.dumps(it) + "\n")
     except OSError as exc:
         raise DarktableMCPError(
-            f"cannot write details file {side_file}: {exc}. "
-            "Is the output directory read-only?"
+            f"cannot write details file {side_file}: {exc}. " "Is the output directory read-only?"
         ) from exc
 
     return {
@@ -575,7 +583,7 @@ def apply_ratings_batch(
     ratings: Mapping[str, int],
     log: bool = True,
     force: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Write XMP sidecars for a batch of ``{key: rating}`` pairs.
 
     The sidecar sits next to its raw, at ``<raw path>.xmp``. Rating range is
@@ -616,15 +624,15 @@ def apply_ratings_batch(
         raise DarktableMCPError(f"source_dir is not a directory: {src}")
 
     log_path = src / "ratings.jsonl" if log else None
-    items: List[Dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
     applied = errors = 0
-    log_entries: List[str] = []
+    log_entries: list[str] = []
     now = time.time()
     # One recursive scan for the whole batch, not one per rating.
     index = _index_raws(src)
 
     for stem, rating in ratings.items():
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "stem": stem,
             "rating": rating,
             "sidecar": None,
@@ -686,7 +694,7 @@ def apply_ratings_batch(
             continue
 
         if existing is None:
-            payload: Optional[bytes] = XMP_TEMPLATE.format(rating=r).encode("utf-8")
+            payload: bytes | None = XMP_TEMPLATE.format(rating=r).encode("utf-8")
             action = "created"
         elif force:
             payload = XMP_TEMPLATE.format(rating=r).encode("utf-8")
@@ -793,9 +801,7 @@ def format_ratings_summary(result: Mapping[str, Any]) -> str:
 
     if result["errors"]:
         bad = [it for it in result["items"] if it.get("error")]
-        line += "\nfailures:\n" + "\n".join(
-            f"  {it['stem']}: {it['error']}" for it in bad[:10]
-        )
+        line += "\nfailures:\n" + "\n".join(f"  {it['stem']}: {it['error']}" for it in bad[:10])
         if len(bad) > 10:
             line += f"\n  ... and {len(bad) - 10} more"
     return line
@@ -808,10 +814,10 @@ _DT_PROP_FILMROLL = 0
 
 
 def _normalize_rating_range(
-    rating: Optional[int],
-    rating_min: Optional[int],
-    rating_max: Optional[int],
-) -> Optional[Tuple[int, int]]:
+    rating: int | None,
+    rating_min: int | None,
+    rating_max: int | None,
+) -> tuple[int, int] | None:
     """Return (lo, hi) for the rating filter, or None when no filter is requested.
 
     Accepts either a single ``rating`` (exact match) or a ``rating_min`` /
@@ -819,9 +825,7 @@ def _normalize_rating_range(
     in the darktable-supported range ``[-1, 5]`` (-1 = reject).
     """
     if rating is not None and (rating_min is not None or rating_max is not None):
-        raise DarktableMCPError(
-            "Pass either `rating` or `rating_min`/`rating_max`, not both."
-        )
+        raise DarktableMCPError("Pass either `rating` or `rating_min`/`rating_max`, not both.")
 
     if rating is not None:
         lo = hi = int(rating)
@@ -832,20 +836,20 @@ def _normalize_rating_range(
         hi = int(rating_max) if rating_max is not None else 5
 
     if lo < -1 or hi > 5 or lo > hi:
-        raise DarktableMCPError(
-            f"rating range out of bounds [-1, 5]: lo={lo}, hi={hi}"
-        )
+        raise DarktableMCPError(f"rating range out of bounds [-1, 5]: lo={lo}, hi={hi}")
     return lo, hi
 
 
 def _format_rating_label(lo: int, hi: int) -> str:
     """Format a rating range as a human-readable hint (e.g. '★★★★★', 'rejected', '★★ to ★★★★')."""
+
     def stars(n: int) -> str:
         if n == -1:
             return "rejected"
         if n == 0:
             return "unstarred"
         return "★" * n
+
     if lo == hi:
         return stars(lo)
     return f"{stars(lo)} to {stars(hi)}"
@@ -855,6 +859,7 @@ def _format_rating_label(lo: int, hi: int) -> str:
 # API 9.6.0 that can drive the rating filter externally. The new
 # filtering panel doesn't expose Lua bindings; the simple-mode filter
 # library doesn't have a `rating` field.
+
 
 def _rating_data_for(lo: int, hi: int) -> str:
     """Encode a rating range as the string darktable's RATING-rule data field expects."""
@@ -875,15 +880,15 @@ def _luacmd_collect_rating(data: str) -> str:
     """
     return (
         'local dt = require("darktable"); '
-        'local r = dt.gui.libs.collect.new_rule(); '
+        "local r = dt.gui.libs.collect.new_rule(); "
         'r.item = "DT_COLLECTION_PROP_RATING"; '
         'r.mode = "DT_LIB_COLLECT_MODE_AND"; '
         f'r.data = "{data}"; '
-        'dt.gui.libs.collect.filter({r})'
+        "dt.gui.libs.collect.filter({r})"
     )
 
 
-def _build_filter_luacmd(lo: int, hi: int) -> Optional[str]:
+def _build_filter_luacmd(lo: int, hi: int) -> str | None:
     """Generate a --luacmd snippet that pre-applies the rating filter.
 
     Returns None when no rule is needed (full range -1..5).
@@ -898,11 +903,11 @@ def _build_filter_luacmd(lo: int, hi: int) -> Optional[str]:
 
 def build_darktable_command(
     source_dir: str | Path,
-    rating: Optional[int] = None,
-    rating_min: Optional[int] = None,
-    rating_max: Optional[int] = None,
+    rating: int | None = None,
+    rating_min: int | None = None,
+    rating_max: int | None = None,
     darktable_path: str = "darktable",
-) -> List[str]:
+) -> list[str]:
     """Build the ``darktable`` command line for opening a folder.
 
     The folder is registered as a film roll on first launch and any XMP
@@ -925,11 +930,14 @@ def build_darktable_command(
 
     rating_range = _normalize_rating_range(rating, rating_min, rating_max)
 
-    cmd: List[str] = [
+    cmd: list[str] = [
         darktable_path,
-        "--conf", "plugins/lighttable/collect/num_rules=1",
-        "--conf", f"plugins/lighttable/collect/item0={_DT_PROP_FILMROLL}",
-        "--conf", "plugins/lighttable/collect/string0=%",
+        "--conf",
+        "plugins/lighttable/collect/num_rules=1",
+        "--conf",
+        f"plugins/lighttable/collect/item0={_DT_PROP_FILMROLL}",
+        "--conf",
+        "plugins/lighttable/collect/string0=%",
     ]
 
     if rating_range is not None:
@@ -961,7 +969,7 @@ _LOCK_SIGNATURES = (
 )
 
 
-def _drain_in_background(proc: Any, sink: Optional[List[str]] = None) -> None:
+def _drain_in_background(proc: Any, sink: list[str] | None = None) -> None:
     """Consume a live child's stdout/stderr on daemon threads.
 
     Keeps the pipes readable without ever blocking the child on a full pipe
@@ -1007,7 +1015,7 @@ def _looks_blocked_by_lock(text: str) -> bool:
     return any(sig in lowered for sig in _LOCK_SIGNATURES)
 
 
-def _wait_for_launch(proc: Any, sink: Optional[List[str]] = None) -> Optional[int]:
+def _wait_for_launch(proc: Any, sink: list[str] | None = None) -> int | None:
     """Poll a freshly spawned process briefly.
 
     Returns its exit code, or None if still alive. Stops early once the
@@ -1015,7 +1023,7 @@ def _wait_for_launch(proc: Any, sink: Optional[List[str]] = None) -> Optional[in
     does not cost the full probe window.
     """
     deadline = time.monotonic() + _LAUNCH_PROBE_SECONDS
-    code: Optional[int] = proc.poll()
+    code: int | None = proc.poll()
     while code is None and time.monotonic() < deadline:
         if sink is not None and _looks_blocked_by_lock("".join(sink)):
             break
@@ -1026,12 +1034,12 @@ def _wait_for_launch(proc: Any, sink: Optional[List[str]] = None) -> Optional[in
 
 def open_in_darktable(
     source_dir: str | Path,
-    rating: Optional[int] = None,
-    rating_min: Optional[int] = None,
-    rating_max: Optional[int] = None,
+    rating: int | None = None,
+    rating_min: int | None = None,
+    rating_max: int | None = None,
     darktable_path: str = "darktable",
     dry_run: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Spawn darktable on ``source_dir``, pre-applying a rating filter.
 
     Opening a folder via the CLI registers it as a film roll on first launch,
@@ -1106,7 +1114,7 @@ def open_in_darktable(
     # Start draining immediately: darktable is chatty at startup (it logs every
     # bundled style it imports), and an undrained 64KB pipe buffer would block
     # the child inside our own probe window.
-    captured: List[str] = []
+    captured: list[str] = []
     _drain_in_background(proc, captured)
 
     exit_code = _wait_for_launch(proc, captured)
@@ -1153,8 +1161,7 @@ def open_in_darktable(
 
     if exit_code is not None:
         message = (
-            f"darktable exited immediately (exit code {exit_code}) instead of "
-            "staying open."
+            f"darktable exited immediately (exit code {exit_code}) instead of " "staying open."
         )
         if detail:
             message += f"\ndarktable said:\n{detail}"
@@ -1195,5 +1202,3 @@ def format_open_summary(result: Mapping[str, Any]) -> str:
                 f"supported — open the lighttable's filter bar to refine.)"
             )
     return "\n".join(lines)
-
-

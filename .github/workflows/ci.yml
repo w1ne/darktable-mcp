@@ -57,14 +57,12 @@ jobs:
         run: python -m pytest -q
 
   lint:
-    name: lint (advisory)
+    name: lint
     runs-on: ubuntu-latest
-    # Advisory only: the tree carries a pre-existing lint backlog (~143 ruff findings
-    # across server.py, tools/preview_tools.py and tools/camera_tools.py, plus 13 files
-    # black would reformat) that is outside the scope of the change adding this
-    # workflow. Drop continue-on-error once that backlog is cleared, so lint becomes a
-    # real gate instead of a report nobody is required to read.
-    continue-on-error: true
+    # A real gate as of the backlog cleanup: `ruff check .` and `black --check .`
+    # are both clean on the whole tree, so any new finding is genuinely new.
+    # Do NOT re-add continue-on-error to get a red build green — fix the finding,
+    # or change the rule in pyproject.toml so the exemption is explicit.
     steps:
       - uses: actions/checkout@v4
 

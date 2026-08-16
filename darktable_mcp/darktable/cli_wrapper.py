@@ -2,18 +2,44 @@
 
 import logging
 import os
+import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from ..utils.errors import DarktableNotFoundError, ExportError
 
 logger = logging.getLogger(__name__)
 
+_SAFE_SUFFIX_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+@dataclass
+class ExportResult:
+    """Outcome of exporting one file."""
+
+    input: str
+    output: Optional[str]
+    ok: bool
+    error: Optional[str]
+
 
 class CLIWrapper:
-    """Wrapper for darktable command-line operations."""
+    """Wrapper for darktable command-line operations.
+
+    Sidecar caveat: exports run against a dedicated `configdir` that is
+    deliberately isolated from the GUI's `~/.config/darktable/` (see
+    `_default_configdir`), so darktable-cli never contends for the
+    library.db lock the running GUI holds. The trade-off is that the CLI
+    cannot see the GUI's library database, so it reads edits **only from
+    XMP sidecar files** next to each raw. A user who has darktable's
+    "write sidecar file for each image" preference turned off gets
+    exports of the *unedited* image with no warning from darktable-cli.
+    Callers should surface this when exports look wrong.
+    """
 
     EXPORT_TIMEOUT_DEFAULT = 120
 
@@ -45,6 +71,10 @@ class CLIWrapper:
         a lock that the running GUI holds and aborts with "database is
         locked". Use the XDG cache namespace instead so each MCP install
         gets its own throwaway library.db.
+
+        Consequence: the throwaway library holds no edit history, so
+        exports pick up develop settings from XMP sidecars only. See the
+        class docstring.
         """
         cache_home = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
         return Path(cache_home) / "darktable-mcp" / "cli-config"
@@ -95,30 +125,47 @@ class CLIWrapper:
     ) -> bool:
         """Export an image using darktable-cli.
 
+        A zero exit code from darktable-cli is not proof of an export:
+        unsupported inputs make it exit 0 while writing nothing. The
+        output path is stat'ed afterwards and a missing or empty file is
+        reported as a failure.
+
         Args:
             input_path: Path to input image
             output_path: Path for output image
             format_type: Export format (jpeg, png, tiff)
             quality: Export quality (1-100)
-            max_width: Maximum width in pixels
-            max_height: Maximum height in pixels
+            max_width: Maximum width in pixels, or None for unconstrained.
+                Passed to darktable-cli's `--width` flag; may be given
+                independently of `max_height`.
+            max_height: Maximum height in pixels, or None for unconstrained.
+                Passed to darktable-cli's `--height` flag.
             timeout: subprocess timeout in seconds (default 120 s).
 
         Returns:
             bool: True if export successful
 
         Raises:
-            ExportError: If export fails
+            ExportError: If export fails, times out, or produces no file
         """
         try:
             cmd = [
                 self.darktable_cli_path,
                 str(input_path),
                 str(output_path),
-                "--core",
-                "--configdir",
-                str(self.configdir),
             ]
+
+            # Size constraints: darktable-cli takes both bounds as first-class
+            # flags and reads 0 as "unconstrained on this axis", so either bound
+            # can be given on its own. The format-specific max_width/max_height
+            # conf keys are jpeg-only and were a no-op for png/tiff. These are
+            # darktable-cli's own options, so they must precede `--core`.
+            if max_width is not None or max_height is not None:
+                cmd.extend(["--width", str(max_width or 0)])
+                cmd.extend(["--height", str(max_height or 0)])
+
+            # Everything after `--core` is handed to the darktable core.
+            cmd.extend(["--core", "--configdir", str(self.configdir)])
 
             fmt = format_type.lower()
             if fmt == "jpeg":
@@ -128,22 +175,13 @@ class CLIWrapper:
             elif fmt == "tiff":
                 cmd.extend(["--conf", "plugins/imageio/format/tiff/bpp=8"])
 
-            # Add size constraints if specified
-            if max_width and max_height:
-                cmd.extend(
-                    [
-                        "--conf",
-                        f"plugins/imageio/format/jpeg/max_width={max_width}",
-                        "--conf",
-                        f"plugins/imageio/format/jpeg/max_height={max_height}",
-                    ]
-                )
-
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
             if result.returncode != 0:
                 error_msg = result.stderr or "Unknown error"
                 raise ExportError(f"Export failed: {error_msg}")
+
+            self._assert_output_written(output_path)
 
             return True
 
@@ -154,43 +192,191 @@ class CLIWrapper:
         except Exception as e:
             raise ExportError(f"Failed to export image: {str(e)}")
 
+    @staticmethod
+    def _assert_output_written(output_path: Path) -> None:
+        """Confirm darktable-cli actually produced the promised file.
+
+        Args:
+            output_path: Path darktable-cli was told to write
+
+        Raises:
+            ExportError: If the path is missing or zero-byte
+        """
+        try:
+            size = output_path.stat().st_size
+        except OSError:
+            raise ExportError(
+                f"Export reported success but wrote no file at {output_path} "
+                f"(darktable-cli can exit 0 on an unsupported input)"
+            )
+
+        if size == 0:
+            raise ExportError(
+                f"Export reported success but wrote a zero-byte file at {output_path}"
+            )
+
+    @staticmethod
+    def _plan_output_paths(
+        input_files: List[Path],
+        output_dir: Path,
+        format_type: str,
+    ) -> List[Path]:
+        """Assign one distinct output path per input, in input order.
+
+        Two inputs from different source folders can share a stem
+        (`DSC_0001.NEF`), which used to make the second export silently
+        overwrite the first. Colliding names get a suffix derived from the
+        source directory, falling back to a `-2`, `-3` counter.
+
+        Args:
+            input_files: Input paths, in the caller's order
+            output_dir: Directory every output lands in
+            format_type: Export format, used as the file extension
+
+        Returns:
+            List[Path]: One output path per input, all distinct
+        """
+        ext = format_type.lower()
+        taken = set()
+        planned: List[Path] = []
+
+        for input_file in input_files:
+            stem = input_file.stem
+            candidate = output_dir / f"{stem}.{ext}"
+
+            if candidate in taken:
+                parent = _SAFE_SUFFIX_RE.sub("-", input_file.parent.name).strip("-")[:32]
+                if parent:
+                    candidate = output_dir / f"{stem}-{parent}.{ext}"
+
+                counter = 2
+                while candidate in taken:
+                    candidate = output_dir / f"{stem}-{counter}.{ext}"
+                    counter += 1
+
+            taken.add(candidate)
+            planned.append(candidate)
+
+        return planned
+
     def batch_export(
         self,
         input_files: List[Path],
         output_dir: Path,
         format_type: str = "jpeg",
         quality: int = 95,
-    ) -> Dict[str, str]:
-        """Export multiple images in batch.
+        max_width: Optional[int] = None,
+        max_height: Optional[int] = None,
+        max_workers: Optional[int] = None,
+        timeout: int = EXPORT_TIMEOUT_DEFAULT,
+    ) -> List[ExportResult]:
+        """Export multiple images in batch, in parallel.
+
+        Each export boots a full darktable core, so the work is
+        subprocess-bound and runs on a small thread pool. Output paths are
+        de-duplicated *before* dispatch so concurrent workers cannot race
+        for the same name.
+
+        Sidecar caveat: exports read develop settings from XMP sidecars
+        only, never from the GUI's library database (see the class
+        docstring). If the user has darktable's "write sidecar file for
+        each image" preference turned off, every file here exports
+        without its edits and darktable-cli reports success. Surface this
+        to the user when a batch looks unedited.
 
         Args:
             input_files: List of input file paths
             output_dir: Output directory
             format_type: Export format
             quality: Export quality
+            max_width: Longest-edge bound in pixels, or None for unconstrained.
+            max_height: Height bound in pixels, or None for unconstrained.
+            max_workers: Thread pool size. Defaults to
+                `min(4, os.cpu_count() or 1)`.
+            timeout: Per-file subprocess timeout in seconds.
 
         Returns:
-            Dict[str, str]: Mapping of input files to status messages
+            List[ExportResult]: One result per input, in input order.
         """
-        results = {}
+        if not input_files:
+            return []
+
         output_dir.mkdir(parents=True, exist_ok=True)
+        planned = self._plan_output_paths(input_files, output_dir, format_type)
 
-        for input_file in input_files:
-            try:
-                output_file = output_dir / f"{input_file.stem}.{format_type.lower()}"
+        workers = max_workers if max_workers and max_workers > 0 else min(4, os.cpu_count() or 1)
+        results: List[Optional[ExportResult]] = [None] * len(input_files)
 
-                success = self.export_image(input_file, output_file, format_type, quality)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    self._export_one,
+                    input_file,
+                    output_file,
+                    format_type,
+                    quality,
+                    max_width=max_width,
+                    max_height=max_height,
+                    timeout=timeout,
+                ): index
+                for index, (input_file, output_file) in enumerate(zip(input_files, planned))
+            }
 
-                if success:
-                    results[str(input_file)] = f"Exported to {output_file}"
-                else:
-                    results[str(input_file)] = "Export failed"
+            for future in as_completed(futures):
+                index = futures[future]
+                results[index] = future.result()
 
-            except Exception as e:
-                results[str(input_file)] = f"Error: {str(e)}"
-                logger.error(f"Failed to export {input_file}: {e}")
+        return [result for result in results if result is not None]
 
-        return results
+    def _export_one(
+        self,
+        input_file: Path,
+        output_file: Path,
+        format_type: str,
+        quality: int,
+        max_width: Optional[int] = None,
+        max_height: Optional[int] = None,
+        timeout: int = EXPORT_TIMEOUT_DEFAULT,
+    ) -> ExportResult:
+        """Export a single file, converting any failure into an ExportResult.
+
+        Args:
+            input_file: Path to the source image
+            output_file: Pre-assigned, collision-free destination path
+            format_type: Export format
+            quality: Export quality
+            max_width: Longest-edge bound in pixels, or None for unconstrained.
+            max_height: Height bound in pixels, or None for unconstrained.
+            timeout: subprocess timeout in seconds
+
+        Returns:
+            ExportResult: Never raises; failures land in `error`.
+        """
+        try:
+            self.export_image(
+                input_file,
+                output_file,
+                format_type,
+                quality,
+                max_width=max_width,
+                max_height=max_height,
+                timeout=timeout,
+            )
+        except Exception as e:
+            logger.error("Failed to export %s: %s", input_file, e)
+            return ExportResult(
+                input=str(input_file),
+                output=str(output_file) if output_file.exists() else None,
+                ok=False,
+                error=str(e),
+            )
+
+        return ExportResult(
+            input=str(input_file),
+            output=str(output_file) if output_file.exists() else None,
+            ok=True,
+            error=None,
+        )
 
     def get_version(self) -> str:
         """Get darktable version information.

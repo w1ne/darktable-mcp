@@ -7,7 +7,42 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
+
+#: How long to sleep between polls of the response file. Small enough that a
+#: fast plugin round-trip still feels instant, large enough not to spin a core.
+POLL_INTERVAL_SECONDS = 0.05
+
+#: Fallback wait for methods with no entry in :data:`DEFAULT_TIMEOUTS`.
+FALLBACK_TIMEOUT = 15.0
+
+#: Per-method wait budgets, in seconds. These are cost estimates for the work
+#: the Lua side actually does: `view_photos` linearly scans `dt.database` in
+#: interpreted Lua, and `import_batch` / `apply_preset` drive darktable's own
+#: importer, which sleeps internally. A single 5s budget for everything made
+#: slow-but-healthy calls look like "darktable is not running".
+DEFAULT_TIMEOUTS = {
+    "view_photos": 30.0,
+    "rate_photos": 30.0,
+    "import_batch": 120.0,
+    "list_styles": 15.0,
+    "apply_preset": 120.0,
+}
+
+
+def resolve_timeout(method: str, timeout: Optional[float] = None) -> float:
+    """Resolve the wait budget for one bridge call.
+
+    Args:
+        method: Bridge method name.
+        timeout: Explicit caller override. Wins over every default when given.
+
+    Returns:
+        float: Seconds to wait before raising :class:`BridgeTimeoutError`.
+    """
+    if timeout is not None:
+        return timeout
+    return DEFAULT_TIMEOUTS.get(method, FALLBACK_TIMEOUT)
 
 
 class BridgeError(Exception):
@@ -47,7 +82,31 @@ class Bridge:
         self._cache_dir = cache_dir or _cache_dir()
         self._plugin_path = plugin_path or _plugin_path()
 
-    def call(self, method: str, params: dict[str, Any], timeout: float = 5.0) -> Any:
+    def call(
+        self,
+        method: str,
+        params: dict[str, Any],
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """Send one request to the plugin and wait for its response.
+
+        Args:
+            method: Bridge method name.
+            params: Method params, serialised into the request file as-is.
+            timeout: Seconds to wait. ``None`` resolves via
+                :data:`DEFAULT_TIMEOUTS`, then :data:`FALLBACK_TIMEOUT`.
+
+        Returns:
+            Any: The plugin's ``result`` field.
+
+        Raises:
+            BridgePluginNotInstalledError: The Lua plugin file is absent.
+            BridgeTimeoutError: No response arrived within the budget.
+            BridgeError: The plugin answered with an ``error`` field.
+            BridgeProtocolError: The response did not match the schema.
+        """
+        timeout = resolve_timeout(method, timeout)
+
         if not self._plugin_path.is_file():
             raise BridgePluginNotInstalledError(
                 f"plugin not installed at {self._plugin_path}. "
@@ -76,7 +135,7 @@ class Bridge:
                     try:
                         text = resp_path.read_text(encoding="utf-8")
                     except OSError:
-                        time.sleep(0.05)
+                        time.sleep(POLL_INTERVAL_SECONDS)
                         continue
                     try:
                         response = json.loads(text)
@@ -98,10 +157,11 @@ class Bridge:
                             f"response has neither error nor result: {response!r}"
                         )
                     return response["result"]
-                time.sleep(0.05)
+                time.sleep(POLL_INTERVAL_SECONDS)
 
             raise BridgeTimeoutError(
-                f"no response from plugin within {timeout}s for method {method!r}"
+                f"method {method!r} got no plugin response within its "
+                f"{timeout:g}s timeout"
             )
         finally:
             # Best-effort cleanup of our own request file.

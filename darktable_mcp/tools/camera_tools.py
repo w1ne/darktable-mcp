@@ -1,10 +1,13 @@
 """Camera-import tooling using libgphoto2."""
 
+import logging
+import math
 import os
 import re
 import shutil
 import subprocess
 import threading
+import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO, Tuple
@@ -12,23 +15,55 @@ from typing import Any, Dict, List, Optional, TextIO, Tuple
 from ..utils.errors import DarktableMCPError
 
 
+logger = logging.getLogger(__name__)
+
 _MSC_PORT_PREFIX = "disk:"
 _MODEL_WORD_RE = re.compile(r"[A-Za-z0-9]{4,}")
+_TAG_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 class CameraTools:
-    """Camera import via gphoto2 (libgphoto2 — same library darktable's GUI uses)."""
+    """Camera import via gphoto2 (libgphoto2 — same library darktable's GUI uses).
+
+    Destination layout: every source folder gets its own subdirectory under
+    the destination, `<destination>/<source-folder-tag>/<filename>`. Camera
+    filenames are only unique *within* one folder — `100NCD80/DSC_0001.NEF`
+    and `101NCD80/DSC_0001.NEF` are different photos, and so are the two
+    `DSC_0001.NEF` on the two cards of a dual-slot body. Flattening every
+    folder into one directory made the second one vanish (gphoto2's
+    `--skip-existing` / the MSC size compare treated it as already copied),
+    which is silent data loss. Per-folder subdirectories make that
+    impossible while keeping resume cheap: a skip can now only happen for
+    the same name in the same source folder.
+    """
 
     DOWNLOAD_TIMEOUT_DEFAULT = 3600
     LIST_FOLDERS_TIMEOUT = 30
     NUM_FILES_TIMEOUT = 30
     PROGRESS_LOG_NAME = ".import.log"
+    #: Subdirectory used when the camera folder tree could not be enumerated
+    #: and a single recursive download from "/" is used instead.
+    ROOT_FOLDER_TAG = "camera"
+    #: Marker that lets `import_from_camera` pick post-flight shortfalls out
+    #: of the generic error list and show them prominently.
+    SHORTFALL_PREFIX = "Post-flight check:"
 
     _FOLDER_LINE_RE = re.compile(r"There (?:is|are) (\d+) folders? in folder '([^']+)'\.")
     _NUM_FILES_RE = re.compile(r":\s*(\d+)\s*$", re.MULTILINE)
 
+    #: stderr of the last `--auto-detect` that exited non-zero yet still
+    #: parsed cameras. Surfaced in the import summary so a partially failed
+    #: detect is distinguishable from a clean one.
+    last_detect_warning: Optional[str] = None
+
     def _detect_cameras(self) -> List[Dict[str, str]]:
         """Run `gphoto2 --auto-detect` and return parsed list of cameras.
+
+        A non-zero exit code with cameras still parsed means the detect
+        only partly worked (one bus enumerated, another refused). That is
+        not fatal — the parsed entries are usable — but it must not look
+        like a clean detect, so the stderr is logged and stashed on
+        `last_detect_warning` for the caller to surface.
 
         Returns:
             List of dicts with keys "model" and "port", e.g.
@@ -38,6 +73,7 @@ class CameraTools:
         Raises:
             DarktableMCPError: if gphoto2 binary is not installed.
         """
+        self.last_detect_warning = None
         try:
             result = subprocess.run(
                 ["gphoto2", "--auto-detect"],
@@ -71,6 +107,14 @@ class CameraTools:
             raise DarktableMCPError(
                 f"gphoto2 exited with code {result.returncode}: " f"{result.stderr.strip()[:200]}"
             )
+        if cameras and result.returncode != 0:
+            detail = result.stderr.strip()[:200] or "(no stderr)"
+            self.last_detect_warning = (
+                f"gphoto2 --auto-detect exited with code {result.returncode} "
+                f"but still listed {len(cameras)} camera(s); some may be "
+                f"missing. stderr: {detail}"
+            )
+            logger.warning("%s", self.last_detect_warning)
         return cameras
 
     def _list_image_folders(self, model: str, port: str) -> List[str]:
@@ -164,6 +208,33 @@ class CameraTools:
         match = self._NUM_FILES_RE.search(result.stdout)
         return int(match.group(1)) if match else None
 
+    @classmethod
+    def _folder_tag(cls, src_folder: str) -> str:
+        """Turn a camera folder path into one filesystem-safe directory name.
+
+        The whole path is kept (joined with "_") because the leaf name alone
+        is not unique: a dual-slot body happily exposes
+        `/store_00010001/DCIM/101D800E` and `/store_00020001/DCIM/101D800E`.
+
+        Args:
+            src_folder: gphoto2 folder path, e.g. "/store_1/DCIM/101D800E".
+
+        Returns:
+            Directory name, e.g. "store_1_DCIM_101D800E". `ROOT_FOLDER_TAG`
+            for "/" or anything that sanitises down to nothing.
+        """
+        parts = [p for p in src_folder.split("/") if p not in ("", ".", "..")]
+        if not parts:
+            return cls.ROOT_FOLDER_TAG
+        tag = _TAG_UNSAFE_RE.sub("_", "_".join(parts))
+        tag = re.sub(r"_+", "_", tag).strip("_")
+        return tag or cls.ROOT_FOLDER_TAG
+
+    @classmethod
+    def _folder_dest(cls, destination: Path, src_folder: str) -> Path:
+        """Destination subdirectory that receives one camera folder's files."""
+        return destination / cls._folder_tag(src_folder)
+
     def _download_one_folder(
         self,
         model: str,
@@ -173,28 +244,53 @@ class CameraTools:
         timeout_seconds: int,
         progress_log: Optional[TextIO] = None,
         expected_total: Optional[int] = None,
-    ) -> Tuple[int, List[str]]:
+    ) -> Tuple[int, int, List[str]]:
         """Run gphoto2 to copy all files in a single camera folder.
+
+        Files land in `<destination>/<folder tag>/`, never directly in
+        `destination`: `%f` is the bare basename, so a shared destination
+        would make `100NCD80/DSC_0001.NEF` and `101NCD80/DSC_0001.NEF`
+        collide and `--skip-existing` would silently drop the second one.
+        With one directory per source folder, `--skip-existing` can only
+        ever skip a re-run of the *same* file, which is what makes resumes
+        cheap and idempotent.
 
         Streams stdout via Popen + reader threads so per-file progress is
         written to `progress_log` as the transfer happens (the user can
         `tail -f` the log file in another terminal). `--filename %f.%C`
-        preserves the file extension. `--skip-existing` makes resumes
-        cheap and idempotent.
+        preserves the file extension.
+
+        When `src_folder` is "/" (folder enumeration failed, so this is one
+        recursive pull of the whole camera) `%F` — gphoto2's own camera
+        folder path — is inserted as well, so the recursion still cannot
+        flatten two folders onto each other.
 
         Args:
+            model: gphoto2 model string.
+            port: gphoto2 port string.
+            src_folder: camera folder to pull.
+            destination: import root; the per-folder subdirectory is
+                created underneath it.
+            timeout_seconds: subprocess timeout for this folder.
             progress_log: open text file handle to receive timestamped
                 "Saving file as ..." lines. None to disable logging.
             expected_total: if known, formats progress as "(N/total)".
 
         Returns:
-            Tuple of (files_saved, error_lines).
+            Tuple of (files_saved, files_skipped, error_lines).
 
         Raises:
             DarktableMCPError: gphoto2 missing or camera locked by another
                 process (gvfs etc.).
             subprocess.TimeoutExpired: caller handles partial transfers.
         """
+        folder_dest = self._folder_dest(destination, src_folder)
+        folder_dest.mkdir(parents=True, exist_ok=True)
+        if self._folder_tag(src_folder) == self.ROOT_FOLDER_TAG:
+            filename_pattern = f"{folder_dest}/%F/%f.%C"
+        else:
+            filename_pattern = f"{folder_dest}/%f.%C"
+
         cmd = [
             "gphoto2",
             "--camera",
@@ -206,7 +302,7 @@ class CameraTools:
             "--get-all-files",
             "--skip-existing",
             "--filename",
-            f"{destination}/%f.%C",
+            filename_pattern,
         ]
 
         env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
@@ -299,15 +395,20 @@ class CameraTools:
                 "or stop gvfs-gphoto2-volume-monitor, then retry."
             )
 
-        return saved, errors
+        return saved, skipped, errors
 
     def _count_files_on_disk(self, destination: Path) -> int:
-        """Count files in the destination directory (non-recursive, ignore log)."""
+        """Count files under the destination, recursively, ignoring the log.
+
+        Recursive because every source folder now gets its own
+        subdirectory — a flat `iterdir()` would count zero and make the
+        post-flight shortfall check fire on a perfectly good import.
+        """
         if not destination.exists():
             return 0
         return sum(
             1
-            for entry in destination.iterdir()
+            for entry in destination.rglob("*")
             if entry.is_file() and entry.name != self.PROGRESS_LOG_NAME
         )
 
@@ -378,39 +479,73 @@ class CameraTools:
                 groups.append([msc_cam])
         return groups
 
+    @classmethod
+    def _msc_folder_tag(cls, mount: Path, sub: Path) -> str:
+        """Destination subdirectory name for one DCIM folder on one card.
+
+        The card is part of the tag because two cards of the same body
+        routinely carry the same folder name (`100NCD80`) holding different
+        photos with the same filenames.
+
+        Args:
+            mount: card mount point, e.g. /media/user/NIKON D800E.
+            sub: the DCIM subfolder, e.g. <mount>/DCIM/100NCD80.
+
+        Returns:
+            Filesystem-safe directory name, e.g. "NIKON_D800E_100NCD80".
+        """
+        parts = [p for p in (mount.name, sub.name) if p]
+        return cls._folder_tag("/".join(parts)) if parts else cls.ROOT_FOLDER_TAG
+
     def _download_from_msc(
         self,
         mount: Path,
         destination: Path,
         timeout_seconds: int = DOWNLOAD_TIMEOUT_DEFAULT,
-    ) -> Tuple[int, List[str]]:
+    ) -> Tuple[int, int, List[str]]:
         """Copy DCIM-shaped files from a USB Mass-Storage card mount.
 
         Walks `<mount>/DCIM/<subdir>/` for image and video files and copies
-        each into `destination`. Files that already exist with matching size
-        are skipped (cheap idempotent resume — same-name + same-size is good
-        enough for cards where filenames are unique per device session).
+        each into `<destination>/<card>_<subdir>/`. Keeping one directory
+        per source folder is what makes the skip test safe: same-name +
+        same-size is only treated as "already copied" when both files come
+        from the same folder on the same card. Flattening made two
+        genuinely different photos that shared a name and a byte size
+        indistinguishable, and the second one was dropped without an error.
 
-        timeout_seconds is accepted for API symmetry with the PTP path but
-        not enforced — filesystem copies are bounded by their own I/O.
+        `timeout_seconds` is an overall budget for the whole walk, checked
+        between files. A flaky reader cannot stall the import for an hour
+        with no explanation any more; the copy stops and reports how far it
+        got so a re-run can resume.
+
+        Args:
+            mount: card mount point.
+            destination: import root.
+            timeout_seconds: overall budget for this card, in seconds.
+
+        Returns:
+            Tuple of (files_saved, files_skipped, error_messages).
         """
-        del timeout_seconds  # filesystem copy doesn't need a subprocess timeout
+        deadline = time.monotonic() + timeout_seconds
         destination.mkdir(parents=True, exist_ok=True)
 
         dcim = mount / "DCIM"
         if not dcim.is_dir():
-            return 0, [f"no DCIM/ folder under {mount}"]
+            return 0, 0, [f"no DCIM/ folder under {mount}"]
 
-        images: List[Path] = []
+        # (source file, destination subdirectory) pairs, folder by folder.
+        images: List[Tuple[Path, Path]] = []
         for sub in sorted(dcim.iterdir()):
             if sub.is_dir():
+                sub_dest = destination / self._msc_folder_tag(mount, sub)
                 for entry in sorted(sub.iterdir()):
                     if entry.is_file() and not entry.name.startswith("."):
-                        images.append(entry)
+                        images.append((entry, sub_dest))
 
         expected = len(images)
         log_path = destination / self.PROGRESS_LOG_NAME
         saved = 0
+        skipped = 0
         errors: List[str] = []
 
         with open(log_path, "a", encoding="utf-8") as log:
@@ -423,15 +558,28 @@ class CameraTools:
             log.write(f"Files found under DCIM: {expected}\n")
             log.flush()
 
-            for src in images:
-                dst = destination / src.name
+            for index, (src, sub_dest) in enumerate(images):
+                if time.monotonic() >= deadline:
+                    msg = (
+                        f"Timed out after {timeout_seconds} s reading {mount}: "
+                        f"copied {saved} new, skipped {skipped}, "
+                        f"{expected - index} file(s) not read. The card reader "
+                        f"may be flaky — re-run the tool to resume."
+                    )
+                    errors.append(msg)
+                    log.write(f"!! {msg}\n")
+                    log.flush()
+                    break
+                dst = sub_dest / src.name
                 try:
                     if dst.exists() and dst.stat().st_size == src.stat().st_size:
+                        skipped += 1
                         continue
+                    sub_dest.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dst)
                     saved += 1
                     ts = datetime.now().strftime("%H:%M:%S")
-                    log.write(f"[{ts}] ({saved}/{expected}) {src.name}\n")
+                    log.write(f"[{ts}] ({saved}/{expected}) {sub_dest.name}/{src.name}\n")
                     log.flush()
                 except OSError as exc:
                     errors.append(f"{src.name}: {exc}")
@@ -441,11 +589,11 @@ class CameraTools:
             log.write(
                 f"=== Import (MSC) finished "
                 f"{datetime.now().isoformat(timespec='seconds')}: "
-                f"{saved} new, {expected} found ===\n"
+                f"{saved} new, {skipped} skipped, {expected} found ===\n"
             )
             log.flush()
 
-        return saved, errors
+        return saved, skipped, errors
 
     def _download_from_camera(
         self,
@@ -453,12 +601,18 @@ class CameraTools:
         port: str,
         destination: Path,
         timeout_seconds: int = DOWNLOAD_TIMEOUT_DEFAULT,
-    ) -> Tuple[int, List[str]]:
+    ) -> Tuple[int, int, List[str]]:
         """Copy all files from a camera, walking each storage folder.
 
         - Pre-flight: enumerate leaf folders + count expected files per folder.
+        - Each folder is written to its own `<dest>/<folder tag>/`
+          subdirectory, so same-named files from different folders or
+          different cards cannot overwrite or "skip-existing" each other.
         - During transfer: stream per-file progress to <dest>/.import.log
           so the user can `tail -f` it.
+        - `timeout_seconds` is an overall budget for this camera, not a
+          per-folder one: each folder gets what is left of it, so N folders
+          can no longer take N × the number the user asked for.
         - Per-folder failures are recorded but don't abort the whole
           transfer (a flaky CF slot won't sink a healthy SD slot).
         - Lock errors raised before any progress propagate so the user
@@ -470,17 +624,20 @@ class CameraTools:
             model: gphoto2 model string (e.g. "Nikon DSC D800E").
             port: gphoto2 port string (e.g. "usb:002,002").
             destination: directory to write files into. Created if missing.
-            timeout_seconds: subprocess timeout per folder. Default 3600 s.
+            timeout_seconds: overall budget for this camera, shared across
+                all its folders. Default 3600 s.
 
         Returns:
-            Tuple of (total_files_saved, error_messages).
+            Tuple of (total_files_saved, total_files_skipped, error_messages).
 
         Raises:
             DarktableMCPError: gphoto2 missing, or camera lock fails before
                 anything is copied.
-            subprocess.TimeoutExpired: a per-folder transfer exceeded
-                `timeout_seconds`. Caller is responsible; partial files may
-                remain in `destination`.
+            subprocess.TimeoutExpired: the first folder exceeded the budget
+                before anything was copied. Caller is responsible; partial
+                files may remain in `destination`. Once files have been
+                copied, a later timeout is recorded as an error instead so
+                the copied count is not lost.
         """
         # USB Mass-Storage entries from gphoto2 take a totally different
         # route — gphoto2's PTP folder enumeration doesn't apply, and the
@@ -492,6 +649,7 @@ class CameraTools:
                 self._msc_mount(port), destination, timeout_seconds
             )
 
+        deadline = time.monotonic() + timeout_seconds
         destination.mkdir(parents=True, exist_ok=True)
 
         folders = self._list_image_folders(model, port)
@@ -510,6 +668,7 @@ class CameraTools:
 
         log_path = destination / self.PROGRESS_LOG_NAME
         total_count = 0
+        total_skipped = 0
         all_errors: List[str] = []
 
         log = open(log_path, "a", encoding="utf-8")
@@ -526,17 +685,34 @@ class CameraTools:
             )
             log.flush()
 
-            for folder, expected in zip(folders, expected_per_folder):
+            for position, (folder, expected) in enumerate(
+                zip(folders, expected_per_folder)
+            ):
+                # Overall budget: each folder only gets what is left of it.
+                remaining = math.ceil(deadline - time.monotonic())
+                if remaining <= 0:
+                    msg = (
+                        f"Transfer budget of {timeout_seconds} s ran out before "
+                        f"folder {folder}: {len(folders) - position} folder(s) "
+                        f"not copied. Re-run the tool with a larger "
+                        f"timeout_seconds to finish — already-copied files are "
+                        f"skipped."
+                    )
+                    all_errors.append(msg)
+                    log.write(f"!! {msg}\n")
+                    log.flush()
+                    break
+
                 expected_str = expected if expected is not None else "?"
                 log.write(f"\n-- Folder {folder} (expected {expected_str}) --\n")
                 log.flush()
                 try:
-                    saved, errors = self._download_one_folder(
+                    saved, skipped, errors = self._download_one_folder(
                         model,
                         port,
                         folder,
                         destination,
-                        timeout_seconds,
+                        remaining,
                         progress_log=log,
                         expected_total=expected_total or None,
                     )
@@ -547,16 +723,36 @@ class CameraTools:
                     log.write(f"!! ERROR in {folder}: {exc}\n")
                     log.flush()
                     continue
+                except subprocess.TimeoutExpired:
+                    if total_count == 0 and not all_errors:
+                        raise
+                    msg = (
+                        f"folder {folder} timed out; {len(folders) - position - 1} "
+                        f"further folder(s) not attempted"
+                    )
+                    all_errors.append(msg)
+                    log.write(f"!! {msg}\n")
+                    log.flush()
+                    break
                 total_count += saved
+                total_skipped += skipped
                 all_errors.extend(errors)
-                log.write(f"-- Folder {folder} done: {saved} new file(s) --\n")
+                log.write(
+                    f"-- Folder {folder} done: {saved} new file(s), "
+                    f"{skipped} skipped --\n"
+                )
                 log.flush()
 
-            disk_count = self._count_files_on_disk(destination)
+            # Count only the folders belonging to this camera, so files put
+            # here by another card in the same import don't mask a shortfall.
+            disk_count = sum(
+                self._count_files_on_disk(self._folder_dest(destination, folder))
+                for folder in folders
+            )
             if expected_total and disk_count < expected_total:
                 shortfall = expected_total - disk_count
                 msg = (
-                    f"Post-flight check: {disk_count}/{expected_total} files "
+                    f"{self.SHORTFALL_PREFIX} {disk_count}/{expected_total} files "
                     f"in destination — {shortfall} short of expected"
                 )
                 all_errors.append(msg)
@@ -564,26 +760,30 @@ class CameraTools:
             log.write(
                 f"\n=== Import finished "
                 f"{datetime.now().isoformat(timespec='seconds')}: "
-                f"{total_count} new, {disk_count} on disk, "
+                f"{total_count} new, {total_skipped} skipped, "
+                f"{disk_count} on disk, "
                 f"{expected_total or '?'} expected ===\n"
             )
             log.flush()
         finally:
             log.close()
 
-        return total_count, all_errors
+        return total_count, total_skipped, all_errors
 
     def import_from_camera(self, arguments: Dict[str, Any]) -> str:
         """Copy all photos from a connected camera to a local directory.
 
         Detects connected cameras via gphoto2 (libgphoto2 — same library
         darktable's GUI camera-import uses) and copies all files to a
-        destination directory. Per-file progress is streamed to a log
-        file inside the destination so long imports can be monitored
-        with `tail -f`. Registering the directory with darktable's
-        library is left to the user (open darktable, click "import folder")
-        because the Lua API path for that step is not yet reliable on all
-        installs.
+        destination directory. Each camera folder / card folder lands in
+        its own subdirectory, `<destination>/<folder tag>/<filename>`,
+        because camera filenames are only unique within one folder and
+        flattening them silently dropped duplicates. Per-file progress is
+        streamed to a log file inside the destination so long imports can
+        be monitored with `tail -f`. Registering the directory with
+        darktable's library is left to the user (open darktable, click
+        "import folder") because the Lua API path for that step is not yet
+        reliable on all installs.
 
         Args:
             arguments: Dictionary containing:
@@ -591,9 +791,10 @@ class CameraTools:
                   Default: ~/Pictures/import-YYYY-MM-DD/
                 - camera_port (str, optional): gphoto2 port string,
                   required when 2+ cameras are connected.
-                - timeout_seconds (int, optional): subprocess timeout for
-                  the transfer. Default 3600 (1 hour). Bump higher for
-                  cards larger than ~50 GB.
+                - timeout_seconds (int, optional): overall budget for the
+                  transfer from one source, shared across all of its
+                  folders. Default 3600 (1 hour). Bump higher for cards
+                  larger than ~50 GB.
 
         Returns:
             Human-readable summary string.
@@ -654,10 +855,11 @@ class CameraTools:
         # files, downstream errors are recorded but don't abort: half a
         # successful import beats no import at all.
         total_count = 0
+        total_skipped = 0
         all_errors: List[str] = []
         for entry in target_group:
             try:
-                count, errors = self._download_from_camera(
+                count, skipped, errors = self._download_from_camera(
                     entry["model"], entry["port"], destination, timeout_seconds
                 )
             except subprocess.TimeoutExpired as exc:
@@ -678,6 +880,7 @@ class CameraTools:
                 all_errors.append(f"{entry['model']} ({entry['port']}): {exc}")
                 continue
             total_count += count
+            total_skipped += skipped
             all_errors.extend(errors)
 
         if total_count == 0 and all_errors:
@@ -691,15 +894,33 @@ class CameraTools:
         disk_count = self._count_files_on_disk(destination)
         sources = ", ".join(f"{c['model']} ({c['port']})" for c in target_group)
 
+        shortfalls = [e for e in all_errors if e.startswith(self.SHORTFALL_PREFIX)]
+        other_errors = [e for e in all_errors if not e.startswith(self.SHORTFALL_PREFIX)]
+
         summary_parts = [
             f"Copied {total_count} new file(s) from {sources}",
-            f"Destination: {destination} ({disk_count} files on disk)",
+            f"Skipped {total_skipped} file(s) already present in the destination",
+            f"Destination: {destination} ({disk_count} files on disk, "
+            "one subdirectory per camera folder)",
             f"Progress log: {log_path}",
             f"  Tail in another terminal during long imports: tail -f \"{log_path}\"",
             "Open darktable and choose 'import folder' on this directory to add them to your library.",
         ]
-        if all_errors:
+        if shortfalls:
+            # Loud on purpose: the user is about to format the card.
+            summary_parts.append("")
             summary_parts.append(
-                f"Warning: {len(all_errors)} issue(s). First: {all_errors[0]}"
+                "!! INCOMPLETE IMPORT — some photos did not make it off the card:"
             )
+            summary_parts.extend(f"     {msg}" for msg in shortfalls)
+            summary_parts.append(
+                "   Do NOT format the card. Re-run this tool to fetch the "
+                "missing files (already-copied files are skipped)."
+            )
+        if other_errors:
+            summary_parts.append(
+                f"Warning: {len(other_errors)} issue(s). First: {other_errors[0]}"
+            )
+        if self.last_detect_warning:
+            summary_parts.append(f"Note: {self.last_detect_warning}")
         return "\n".join(summary_parts)

@@ -6,7 +6,7 @@ import sys
 
 from .server import DarktableMCPServer
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "w1ne"
 __email__ = "14119286+w1ne@users.noreply.github.com"
 
@@ -44,9 +44,11 @@ def main() -> None:
     args = sys.argv[1:]
     if args and args[0] == "install-plugin":
         from .cli.install_plugin import install_main
+
         sys.exit(install_main(args[1:]))
     if args and args[0] == "uninstall-plugin":
         from .cli.install_plugin import uninstall_main
+
         sys.exit(uninstall_main(args[1:]))
     _run_server()
 

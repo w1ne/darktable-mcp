@@ -1,0 +1,401 @@
+name: Release
+
+# Two entry points, deliberately asymmetric:
+#
+#   * push of a `v*` tag  -> the real release. Tests, build, artifact
+#                            verification, then publish to PyPI.
+#   * workflow_dispatch   -> a rehearsal. Same tests, same build, same
+#                            verification, and optionally an upload to
+#                            TestPyPI so the OIDC path can be exercised
+#                            without burning a version number on the real
+#                            index. It can never publish to PyPI.
+#
+# A plain branch push does not trigger this workflow at all, and both publish
+# jobs additionally guard on the event, so no branch push can reach an upload.
+# Branch/PR coverage lives in ci.yml.
+#
+# ---------------------------------------------------------------------------
+# ONE-TIME MANUAL SETUP ON PYPI (must be done before the first release)
+# ---------------------------------------------------------------------------
+# This workflow uses PyPI Trusted Publishing (OIDC). There is no API token in
+# repo secrets, so there is no long-lived credential to leak or rotate. In
+# exchange, the publisher has to be registered once on PyPI's side.
+#
+# `darktable-mcp` does not exist on PyPI yet, so use the *pending* publisher
+# form (it creates the project on the first successful upload):
+#
+#   https://pypi.org/manage/account/publishing/
+#
+#     PyPI Project Name:  darktable-mcp
+#     Owner:              w1ne
+#     Repository name:    darktable-mcp
+#     Workflow name:      release.yml
+#     Environment name:   pypi
+#
+# Then repeat the same form on TestPyPI if you want the rehearsal path:
+#
+#   https://test.pypi.org/manage/account/publishing/
+#
+#     PyPI Project Name:  darktable-mcp
+#     Owner:              w1ne
+#     Repository name:    darktable-mcp
+#     Workflow name:      release.yml
+#     Environment name:   testpypi
+#
+# Finally create the two GitHub environments (Settings -> Environments):
+# `pypi` and `testpypi`. The environment name must match the value registered
+# above exactly, or PyPI rejects the OIDC token. Adding required reviewers to
+# the `pypi` environment is optional but recommended: it turns the upload into
+# a deliberate button press.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish-testpypi:
+        description: 'Also upload the built artifacts to TestPyPI (rehearsal)'
+        type: boolean
+        default: false
+
+# Least privilege by default. `id-token: write` is granted per job, only to the
+# two publish jobs that actually need to mint an OIDC token.
+permissions:
+  contents: read
+
+concurrency:
+  # Serialize per tag. Do NOT cancel in progress: cancelling a half-finished
+  # upload is worse than letting it complete.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate 1: the suite. Mirrors ci.yml's `test` job, including the Lua
+  # interpreter and DARKTABLE_MCP_REQUIRE_LUA=1 so the dispatcher tests cannot
+  # silently skip. Nothing downstream runs unless this is green on every
+  # supported interpreter -- publishing an artifact whose suite never ran is
+  # the whole failure mode this job exists to prevent.
+  # ---------------------------------------------------------------------------
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same matrix as ci.yml. 3.10 is the real floor: every mcp release in
+        # the pinned range declares Requires-Python >=3.10.
+        python-version: ['3.10', '3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Lua interpreter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+          command -v lua || sudo ln -s "$(command -v lua5.4)" /usr/local/bin/lua
+          lua -v
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+
+      - name: Run tests
+        env:
+          DARKTABLE_MCP_REQUIRE_LUA: '1'
+        run: python -m pytest -q
+
+  # ---------------------------------------------------------------------------
+  # Gate 2: build the artifacts and prove they are the ones we meant to ship.
+  # Everything a user hits on `pip install darktable-mcp` is checked here, from
+  # an environment that cannot be rescued by the source tree.
+  # ---------------------------------------------------------------------------
+  build:
+    name: build and verify artifacts
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # The sdist self-test below runs tests/test_lua_dispatcher.py for real.
+      - name: Install Lua interpreter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+          command -v lua || sudo ln -s "$(command -v lua5.4)" /usr/local/bin/lua
+          lua -v
+
+      # Read __version__ without importing the package: importing it drags in
+      # `mcp`, and this step must work before anything is installed.
+      - name: Read declared package version
+        id: ver
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import ast
+          import pathlib
+
+          src = pathlib.Path("darktable_mcp/__init__.py").read_text(encoding="utf-8")
+          for node in ast.parse(src).body:
+              if isinstance(node, ast.Assign) and any(
+                  isinstance(t, ast.Name) and t.id == "__version__" for t in node.targets
+              ):
+                  print("version=" + ast.literal_eval(node.value))
+                  break
+          else:
+              raise SystemExit("no __version__ assignment in darktable_mcp/__init__.py")
+          PY
+
+      # A tag/version mismatch is the classic way a release ships the wrong
+      # number: `git tag v0.3.0` on a tree that still says __version__ = "0.2.0"
+      # uploads 0.2.0 and permanently burns that version on PyPI.
+      - name: Guard - git tag must match darktable_mcp.__version__
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          PKG_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} means version ${TAG_VERSION}, but darktable_mcp.__version__ is ${PKG_VERSION}. Fix darktable_mcp/__init__.py or re-tag; do not publish."
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches darktable_mcp.__version__ = ${PKG_VERSION}"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: twine check
+        # --strict: a metadata warning becomes an error. PyPI renders the long
+        # description from this metadata; a warning here is a broken project page.
+        run: twine check --strict dist/*
+
+      # The artifacts are opaque once uploaded. Assert their contents now.
+      - name: Verify artifact contents
+        run: |
+          python - <<'PY'
+          import pathlib
+          import sys
+          import tarfile
+          import zipfile
+
+          dist = pathlib.Path("dist")
+          sdists = sorted(dist.glob("*.tar.gz"))
+          wheels = sorted(dist.glob("*.whl"))
+          assert len(sdists) == 1, f"expected exactly one sdist, got {sdists}"
+          assert len(wheels) == 1, f"expected exactly one wheel, got {wheels}"
+
+          with tarfile.open(sdists[0]) as tf:
+              sdist_names = tf.getnames()
+          with zipfile.ZipFile(wheels[0]) as zf:
+              wheel_names = zf.namelist()
+
+          root = sdist_names[0].split("/")[0]
+          rel = {n[len(root) + 1:] for n in sdist_names if n.startswith(root + "/")}
+
+          failures = []
+
+          # The wheel is what `pip install darktable-mcp` unpacks. If the Lua
+          # plugin is not in it, `darktable-mcp install-plugin` -- the very first
+          # command every user runs -- dies on importlib.resources.
+          if "darktable_mcp/lua/darktable_mcp.lua" not in wheel_names:
+              failures.append(
+                  "wheel is missing darktable_mcp/lua/darktable_mcp.lua; check "
+                  "[tool.setuptools.package-data] in pyproject.toml"
+              )
+
+          # The sdist has to be a buildable, testable copy of the project.
+          # setuptools' sdist defaults pick up tests/test_*.py but NOT
+          # tests/__init__.py and NOT non-.py fixtures such as the Lua file the
+          # dispatcher test executes, so MANIFEST.in has to graft them.
+          for name in (
+              "darktable_mcp/lua/darktable_mcp.lua",
+              "tests/__init__.py",
+              "tests/lua/test_dispatcher.lua",
+              "pyproject.toml",
+              "README.md",
+              "LICENSE",
+          ):
+              if name not in rel:
+                  failures.append(f"sdist is missing {name}")
+          if not any(n.startswith("tests/test_") and n.endswith(".py") for n in rel):
+              failures.append("sdist carries no tests/test_*.py")
+
+          junk_prefixes = (
+              ".venv/", "venv/", "build/", "dist/", ".git/",
+              ".mypy_cache/", ".pytest_cache/", ".ruff_cache/",
+          )
+          for n in sorted(rel):
+              if (
+                  n.startswith(junk_prefixes)
+                  or "__pycache__/" in n
+                  or n.endswith((".pyc", ".pyo"))
+              ):
+                  failures.append(f"sdist contains junk: {n}")
+
+          if failures:
+              print("ARTIFACT CHECK FAILED:")
+              for f in failures:
+                  print("  -", f)
+              sys.exit(1)
+
+          print(f"sdist {sdists[0].name}: {len(rel)} entries, lua + tests present, no junk")
+          print(f"wheel {wheels[0].name}: {len(wheel_names)} entries, lua present")
+          PY
+
+      # A sdist that cannot build and test itself is not a release artifact,
+      # it is a tarball. Unpack it somewhere the repo checkout cannot help it
+      # and run the real suite out of it.
+      - name: Verify the sdist is self-contained
+        run: |
+          set -euo pipefail
+          SDIST="$(ls "$GITHUB_WORKSPACE"/dist/*.tar.gz)"
+          UNPACK="$RUNNER_TEMP/sdist-check"
+          rm -rf "$UNPACK" "$RUNNER_TEMP/sdist-venv"
+          mkdir -p "$UNPACK"
+          tar xzf "$SDIST" -C "$UNPACK"
+          SRC="$(find "$UNPACK" -mindepth 1 -maxdepth 1 -type d)"
+          python -m venv "$RUNNER_TEMP/sdist-venv"
+          "$RUNNER_TEMP/sdist-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/sdist-venv/bin/python" -m pip install "${SRC}[dev]"
+          cd "$SRC"
+          DARKTABLE_MCP_REQUIRE_LUA=1 "$RUNNER_TEMP/sdist-venv/bin/python" -m pytest -q
+
+      # The check that matters most, and the one that is easy to fake: install
+      # the wheel into a venv outside the checkout and exercise it from a
+      # working directory that is NOT the repo. Running this from the repo root
+      # would let the source tree satisfy every import and hide a data file
+      # that never made it into the wheel.
+      - name: Verify the installed wheel from outside the checkout
+        env:
+          PKG_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          WHEEL="$(ls "$GITHUB_WORKSPACE"/dist/*.whl)"
+          VENV="$RUNNER_TEMP/wheel-venv"
+          WORK="$RUNNER_TEMP/wheel-work"
+          FAKE_HOME="$RUNNER_TEMP/fake-home"
+          rm -rf "$VENV" "$WORK" "$FAKE_HOME"
+          mkdir -p "$WORK" "$FAKE_HOME"
+          python -m venv "$VENV"
+          "$VENV/bin/python" -m pip install --upgrade pip
+          "$VENV/bin/python" -m pip install "$WHEEL"
+
+          cd "$WORK"
+          "$VENV/bin/python" - <<'PY'
+          import importlib.metadata
+          import importlib.resources
+          import os
+
+          import darktable_mcp
+
+          expected = os.environ["PKG_VERSION"]
+          assert "site-packages" in darktable_mcp.__file__, (
+              f"imported the source tree, not the installed wheel: {darktable_mcp.__file__}"
+          )
+          assert darktable_mcp.__version__ == expected, (
+              f"__version__ is {darktable_mcp.__version__!r}, expected {expected!r}"
+          )
+          dist_version = importlib.metadata.version("darktable-mcp")
+          assert dist_version == expected, (
+              f"dist metadata version is {dist_version!r}, expected {expected!r}; "
+              "the dynamic version wiring in pyproject.toml is broken"
+          )
+
+          lua = importlib.resources.files("darktable_mcp").joinpath("lua/darktable_mcp.lua")
+          assert lua.is_file(), f"packaged Lua plugin missing from the wheel at {lua}"
+          assert len(lua.read_bytes()) > 0, "packaged Lua plugin is empty"
+
+          # The exact call `darktable-mcp install-plugin` makes.
+          from darktable_mcp.cli.install_plugin import _packaged_lua_bytes
+
+          assert len(_packaged_lua_bytes()) > 0
+          print(f"installed wheel OK: version {expected}, Lua plugin {len(lua.read_bytes())} bytes")
+          PY
+
+          # Console script: entry point resolves, and the subcommand every user
+          # runs first actually writes the plugin out of the installed package.
+          "$VENV/bin/darktable-mcp" --help
+          "$VENV/bin/darktable-mcp" install-plugin --help
+          HOME="$FAKE_HOME" "$VENV/bin/darktable-mcp" install-plugin
+          test -s "$FAKE_HOME/.config/darktable/lua/darktable_mcp.lua"
+          grep -qx 'require "darktable_mcp"' "$FAKE_HOME/.config/darktable/luarc"
+          HOME="$FAKE_HOME" "$VENV/bin/darktable-mcp" uninstall-plugin
+          test ! -e "$FAKE_HOME/.config/darktable/lua/darktable_mcp.lua"
+          echo "console script OK"
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Rehearsal upload. Manual dispatch only, opt-in via the input, and it can
+  # never run on a tag push -- so it can never be mistaken for the real thing.
+  # ---------------------------------------------------------------------------
+  publish-testpypi:
+    name: publish to TestPyPI (rehearsal)
+    if: github.event_name == 'workflow_dispatch' && inputs.publish-testpypi
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/darktable-mcp
+    permissions:
+      id-token: write   # OIDC token for Trusted Publishing; no API token needed
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # A second rehearsal of the same version is normal and should not go
+          # red just because TestPyPI already holds that file. This flag is
+          # deliberately NOT set on the real publish below.
+          skip-existing: true
+
+  # ---------------------------------------------------------------------------
+  # The real release. Tag pushes only.
+  # ---------------------------------------------------------------------------
+  publish-pypi:
+    name: publish to PyPI
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/darktable-mcp
+    permissions:
+      id-token: write   # OIDC token for Trusted Publishing; no API token needed
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No skip-existing: re-tagging a version already on PyPI is a mistake,
+        # and it must go red rather than report a silent success.

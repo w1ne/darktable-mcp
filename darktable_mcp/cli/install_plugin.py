@@ -22,11 +22,7 @@ def _luarc_path(home: Path) -> Path:
 
 
 def _packaged_lua_bytes() -> bytes:
-    return (
-        importlib.resources.files("darktable_mcp")
-        .joinpath("lua/darktable_mcp.lua")
-        .read_bytes()
-    )
+    return importlib.resources.files("darktable_mcp").joinpath("lua/darktable_mcp.lua").read_bytes()
 
 
 def _is_active_require_line(line: str) -> bool:
@@ -51,9 +47,7 @@ def install(home: Path) -> None:
         text = luarc.read_text(encoding="utf-8")
     else:
         text = ""
-    already_active = any(
-        _is_active_require_line(ln) for ln in text.splitlines()
-    )
+    already_active = any(_is_active_require_line(ln) for ln in text.splitlines())
     if not already_active:
         if text and not text.endswith("\n"):
             text += "\n"

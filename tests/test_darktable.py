@@ -132,9 +132,7 @@ class TestCLIWrapperConfigdir:
         assert wrapper.configdir.is_dir()
 
     @patch("shutil.which", return_value="/usr/bin/darktable-cli")
-    def test_default_configdir_falls_back_to_home_cache(
-        self, _mock_which, tmp_path, monkeypatch
-    ):
+    def test_default_configdir_falls_back_to_home_cache(self, _mock_which, tmp_path, monkeypatch):
         monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))
         wrapper = CLIWrapper()
@@ -159,9 +157,7 @@ class TestCLIWrapperExport:
 
     @patch("darktable_mcp.darktable.cli_wrapper.subprocess.run")
     @patch("shutil.which", return_value="/usr/bin/darktable-cli")
-    def test_export_passes_configdir_to_darktable_cli(
-        self, _mock_which, mock_run, tmp_path
-    ):
+    def test_export_passes_configdir_to_darktable_cli(self, _mock_which, mock_run, tmp_path):
         mock_run.side_effect = fake_run()
         cfg = tmp_path / "cfg"
         wrapper = CLIWrapper(configdir=cfg)
@@ -185,9 +181,7 @@ class TestCLIWrapperExport:
 
     @patch("darktable_mcp.darktable.cli_wrapper.subprocess.run")
     @patch("shutil.which", return_value="/usr/bin/darktable-cli")
-    def test_export_failure_raises_export_error_with_stderr(
-        self, _mock_which, mock_run, tmp_path
-    ):
+    def test_export_failure_raises_export_error_with_stderr(self, _mock_which, mock_run, tmp_path):
         mock_run.side_effect = fake_run(returncode=1, stderr="database is locked")
         wrapper = CLIWrapper(configdir=tmp_path)
         with pytest.raises(ExportError, match="database is locked"):
@@ -199,9 +193,7 @@ class TestCLIWrapperExport:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd=["darktable-cli"], timeout=5)
         wrapper = CLIWrapper(configdir=tmp_path)
         with pytest.raises(ExportError, match="timed out"):
-            wrapper.export_image(
-                Path("/in.NEF"), tmp_path / "out.jpg", "jpeg", timeout=5
-            )
+            wrapper.export_image(Path("/in.NEF"), tmp_path / "out.jpg", "jpeg", timeout=5)
 
 
 class TestCLIWrapperOutputVerification:
@@ -424,9 +416,7 @@ class TestBatchExportParallelism:
 
     @patch("darktable_mcp.darktable.cli_wrapper.subprocess.run")
     @patch("shutil.which", return_value="/usr/bin/darktable-cli")
-    def test_results_stay_in_input_order_under_parallelism(
-        self, _mock_which, mock_run, tmp_path
-    ):
+    def test_results_stay_in_input_order_under_parallelism(self, _mock_which, mock_run, tmp_path):
         def _run(cmd, *_args, **_kwargs):
             # Finish in reverse order so a naive as_completed collector scrambles.
             index = int(Path(cmd[1]).stem)
@@ -440,9 +430,7 @@ class TestBatchExportParallelism:
         results = wrapper.batch_export(inputs, tmp_path / "out", max_workers=8)
 
         assert [r.input for r in results] == [str(p) for p in inputs]
-        assert [r.output for r in results] == [
-            str(tmp_path / "out" / f"{i}.jpg") for i in range(8)
-        ]
+        assert [r.output for r in results] == [str(tmp_path / "out" / f"{i}.jpg") for i in range(8)]
 
     @patch("darktable_mcp.darktable.cli_wrapper.subprocess.run")
     @patch("shutil.which", return_value="/usr/bin/darktable-cli")
@@ -475,9 +463,7 @@ class TestBatchExportParallelism:
     def test_max_workers_defaults_without_argument(self, _mock_which, mock_run, tmp_path):
         mock_run.side_effect = fake_run()
         wrapper = CLIWrapper(configdir=tmp_path / "cfg")
-        results = wrapper.batch_export(
-            [Path(f"/src/{i}.NEF") for i in range(6)], tmp_path / "out"
-        )
+        results = wrapper.batch_export([Path(f"/src/{i}.NEF") for i in range(6)], tmp_path / "out")
 
         assert len(results) == 6
         assert all(r.ok for r in results)

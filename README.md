@@ -27,9 +27,13 @@ client; this server drives darktable.
   <destination>/.import.log
   ```
 
-  Camera filenames repeat across folders, across the two cards of a dual-slot body, and across *bodies* importing into the same destination — and the default destination `~/Pictures/import-YYYY-MM-DD/` is shared by every import on the same day. The old flat layout combined with `--skip-existing` silently dropped those duplicates. Import the destination recursively.
+  Camera filenames repeat across folders, across the two cards of a dual-slot body, and across *bodies* importing into the same destination — and the default destination `~/Pictures/import-YYYY-MM-DD/` is shared by every import on the same day. The old flat layout combined with gphoto2's `--skip-existing` silently dropped those duplicates; correctness no longer rests on that flag, which now only ever sees files the same run just wrote into its own private staging directory. Import the destination recursively.
 
-  The serial number is read once per camera via `gphoto2 --get-config serialnumber` and omitted when the camera doesn't report one. On the card-copy path a file that would collide with a *different* photo already on disk is written alongside it as `IMG_0001-2.CR3` and reported — never overwritten; sameness is judged on size plus the first and last 8 KB, and is only ever used to authorise a skip. **Known limit:** two bodies of the same model that report no serial cannot be distinguished, so give those separate destinations.
+  The serial number is read once per camera via `gphoto2 --get-config serialnumber` and omitted when the camera doesn't report one. On both paths a file that would collide with a *different* photo already on disk is written alongside it as `IMG_0001-2.CR3` and reported — never overwritten; sameness is judged on size plus the first and last 8 KB, and is only ever used to authorise a skip.
+
+  Two bodies of the same model that report no serial share a destination subdirectory, and **both bodies' photos are kept there**. The PTP path downloads into a private staging area and, before skipping files the destination appears to already hold, re-checks a bounded sample of them against the bytes on disk — a second body fails that check and its folder is fetched in full. Re-running stays cheap: a body with a serial transfers nothing it already delivered, and one without transfers at most 3 files per folder. Any file the card lists that doesn't reach the destination is reported by name.
+
+  **Residual limit:** that sample is bounded at 3 files per folder, so a second body whose sampled files are byte-identical to the first body's — in a folder holding more than 3 candidates — is still taken to be the same body. Folders with 3 or fewer candidates are checked exhaustively.
 
   `timeout_seconds` is an **overall budget for one camera**, shared across all its folders — not a per-folder timeout. Skipped files are counted and reported, and a post-flight shortfall (fewer files on disk than the camera said it held) is surfaced as a prominent `!! INCOMPLETE IMPORT` block, because that is the moment before someone formats the card.
 
@@ -121,7 +125,9 @@ No SQLite poking, no half-imported state, no GUI launch until step 3.
 - An MCP-compatible client (Claude Desktop, Claude Code, etc.)
 - Linux, or macOS for the parts that don't need `gphoto2`. The plugin installer writes to `~/.config/darktable/`, which is where darktable keeps its config on Linux and macOS but **not** on Windows — `import_from_camera` also needs `gphoto2`, which has no Windows build.
 
-The MCP SDK is pinned to `mcp>=1.9,<2`. mcp 2.0.0 removed the `@server.list_tools()` / `@server.call_tool()` decorators this server is built on; porting to the 2.x `MCPServer` API is open work.
+The MCP SDK is pinned to `mcp>=2,<3`. Tools are registered through the mcp 2.x low-level `Server(on_list_tools=…, on_call_tool=…)` handlers; the 1.x decorators this server used before do not exist in 2.x, so **mcp 1.x cannot run this code**.
+
+The low-level API is deliberate. The high-level `MCPServer` derives each `inputSchema` from the handler signature, which cannot express `additionalProperties: {type: integer, minimum: -1, maximum: 5}` — the rating bounds on `apply_ratings_batch` silently disappear — and it injects a `title` into every property. The tool schemas here are handwritten and pinned by a golden-snapshot test, because their descriptions are what the calling model reads to decide behaviour.
 
 ## Contributing
 

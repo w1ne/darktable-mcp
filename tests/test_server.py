@@ -1,9 +1,16 @@
 """Tests for the main MCP server."""
 
+import difflib
+import json
 from contextlib import asynccontextmanager
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+import anyio
 import pytest
+from mcp.client import ClientSession
+from mcp.shared.memory import create_client_server_memory_streams
+from mcp.types import CallToolResult, TextContent, Tool
 
 from darktable_mcp.server import DarktableMCPServer
 
@@ -40,9 +47,10 @@ class TestDarktableMCPServer:
         async def fake_stdio():
             yield (AsyncMock(), AsyncMock())
 
-        with patch("darktable_mcp.server.stdio_server", fake_stdio), patch.object(
-            server.app, "run", new=AsyncMock(return_value=None)
-        ) as mock_run:
+        with (
+            patch("darktable_mcp.server.stdio_server", fake_stdio),
+            patch.object(server.app, "run", new=AsyncMock(return_value=None)) as mock_run,
+        ):
             await server.start()
             mock_run.assert_called_once()
 
@@ -89,9 +97,7 @@ async def test_handle_view_photos_returns_formatted_list():
     # export_images don't compose.
     assert "/photos/a.NEF" in text
     assert "/photos/b.NEF" in text
-    server.bridge.call.assert_called_once_with(
-        "view_photos", {"filter": "", "limit": 10}
-    )
+    server.bridge.call.assert_called_once_with("view_photos", {"filter": "", "limit": 10})
 
 
 @pytest.mark.asyncio
@@ -147,9 +153,7 @@ async def test_handle_import_batch_returns_count():
     result = await server._handle_import_batch({"source_path": "/path/foo"})
     assert "Imported 12" in result[0].text
     assert "/path/foo" in result[0].text
-    server.bridge.call.assert_called_once_with(
-        "import_batch", {"source_path": "/path/foo"}
-    )
+    server.bridge.call.assert_called_once_with("import_batch", {"source_path": "/path/foo"})
 
 
 @pytest.mark.asyncio
@@ -217,9 +221,12 @@ async def test_handle_apply_preset_returns_applied_count():
     server = DarktableMCPServer()
     server.bridge = Mock()
     server.bridge.call.return_value = {"applied": 3, "missed": [], "preset_name": "myStyle"}
-    result = await server._handle_apply_preset({
-        "photo_ids": ["1", "2", "3"], "preset_name": "myStyle",
-    })
+    result = await server._handle_apply_preset(
+        {
+            "photo_ids": ["1", "2", "3"],
+            "preset_name": "myStyle",
+        }
+    )
     text = result[0].text
     assert "myStyle" in text
     assert "3 photo" in text
@@ -230,11 +237,16 @@ async def test_handle_apply_preset_reports_missed():
     server = DarktableMCPServer()
     server.bridge = Mock()
     server.bridge.call.return_value = {
-        "applied": 1, "missed": ["999"], "preset_name": "myStyle",
+        "applied": 1,
+        "missed": ["999"],
+        "preset_name": "myStyle",
     }
-    result = await server._handle_apply_preset({
-        "photo_ids": ["1", "999"], "preset_name": "myStyle",
-    })
+    result = await server._handle_apply_preset(
+        {
+            "photo_ids": ["1", "999"],
+            "preset_name": "myStyle",
+        }
+    )
     text = result[0].text
     assert "999" in text
     assert "Missed" in text
@@ -247,9 +259,12 @@ async def test_handle_apply_preset_friendly_error_when_dt_not_running():
     server = DarktableMCPServer()
     server.bridge = Mock()
     server.bridge.call.side_effect = BridgeTimeoutError("timeout")
-    result = await server._handle_apply_preset({
-        "photo_ids": ["1"], "preset_name": "x",
-    })
+    result = await server._handle_apply_preset(
+        {
+            "photo_ids": ["1"],
+            "preset_name": "x",
+        }
+    )
     assert "darktable" in result[0].text.lower()
 
 
@@ -271,12 +286,14 @@ async def test_handle_export_images_writes_side_file_and_short_summary(tmp_path)
     server._cli = Mock()
     server._cli.batch_export.return_value = fake_results
 
-    result = await server._handle_export_images({
-        "photo_ids": ["/in/A.NEF", "/in/B.NEF", "/in/C.NEF"],
-        "output_path": str(tmp_path),
-        "format": "jpeg",
-        "quality": 95,
-    })
+    result = await server._handle_export_images(
+        {
+            "photo_ids": ["/in/A.NEF", "/in/B.NEF", "/in/C.NEF"],
+            "output_path": str(tmp_path),
+            "format": "jpeg",
+            "quality": 95,
+        }
+    )
     text = result[0].text
 
     # Summary stays compact: counts + side file pointer + first error.
@@ -320,11 +337,13 @@ async def test_handle_export_images_trusts_ok_not_the_output_string(tmp_path):
         ),
     ]
 
-    result = await server._handle_export_images({
-        "photo_ids": ["/in/A.NEF"],
-        "output_path": str(tmp_path),
-        "format": "jpeg",
-    })
+    result = await server._handle_export_images(
+        {
+            "photo_ids": ["/in/A.NEF"],
+            "output_path": str(tmp_path),
+            "format": "jpeg",
+        }
+    )
     assert "exported: 1, failed: 0" in result[0].text
 
 
@@ -347,11 +366,13 @@ async def test_handle_export_images_offloads_the_batch(tmp_path):
     server._cli = Mock()
     server._cli.batch_export.side_effect = slow_batch_export
 
-    await server._handle_export_images({
-        "photo_ids": ["/in/A.NEF"],
-        "output_path": str(tmp_path),
-        "format": "jpeg",
-    })
+    await server._handle_export_images(
+        {
+            "photo_ids": ["/in/A.NEF"],
+            "output_path": str(tmp_path),
+            "format": "jpeg",
+        }
+    )
     assert seen["thread"] != loop_thread, "batch_export ran on the event loop thread"
 
 
@@ -376,13 +397,15 @@ async def test_handle_export_images_threads_max_dimensions_through(tmp_path):
         ExportResult(input="/in/A.NEF", output=f"{tmp_path}/A.jpg", ok=True, error=None),
     ]
 
-    await server._handle_export_images({
-        "photo_ids": ["/in/A.NEF"],
-        "output_path": str(tmp_path),
-        "format": "jpeg",
-        "max_width": 2048,
-        "max_height": 1536,
-    })
+    await server._handle_export_images(
+        {
+            "photo_ids": ["/in/A.NEF"],
+            "output_path": str(tmp_path),
+            "format": "jpeg",
+            "max_width": 2048,
+            "max_height": 1536,
+        }
+    )
     kwargs = server._cli.batch_export.call_args.kwargs
     assert kwargs["max_width"] == 2048
     assert kwargs["max_height"] == 1536
@@ -398,11 +421,13 @@ async def test_handle_export_images_defaults_max_dimensions_to_none(tmp_path):
         ExportResult(input="/in/A.NEF", output=f"{tmp_path}/A.jpg", ok=True, error=None),
     ]
 
-    await server._handle_export_images({
-        "photo_ids": ["/in/A.NEF"],
-        "output_path": str(tmp_path),
-        "format": "jpeg",
-    })
+    await server._handle_export_images(
+        {
+            "photo_ids": ["/in/A.NEF"],
+            "output_path": str(tmp_path),
+            "format": "jpeg",
+        }
+    )
     kwargs = server._cli.batch_export.call_args.kwargs
     assert kwargs["max_width"] is None
     assert kwargs["max_height"] is None
@@ -433,7 +458,7 @@ def test_cli_batch_export_accepts_the_max_dimensions_the_handler_sends():
 def test_export_images_schema_exposes_size_limits_but_not_tuning_knobs():
     server = DarktableMCPServer()
     tool = next(t for t in server._tool_definitions() if t.name == "export_images")
-    props = tool.inputSchema["properties"]
+    props = tool.input_schema["properties"]
 
     assert props["max_width"]["type"] == "integer"
     assert props["max_height"]["type"] == "integer"
@@ -462,7 +487,7 @@ class TestBridgeErrorMappingIsSharedOnce:
         from darktable_mcp import server as server_module
 
         source = inspect.getsource(server_module)
-        assert source.count("darktable-mcp install-plugin\",") == 1
+        assert source.count('darktable-mcp install-plugin",') == 1
         assert source.count("bridge timeout") == 1
         assert source.count('text=f"Plugin error: {e}"') == 1
 
@@ -493,7 +518,7 @@ class TestBridgeErrorMappingIsSharedOnce:
 
 @pytest.mark.asyncio
 async def test_timeout_message_names_the_budget_and_both_causes():
-    """"darktable not running" was a lie for a slow-but-alive call. The text
+    """ "darktable not running" was a lie for a slow-but-alive call. The text
     must name the budget that elapsed and offer both explanations."""
     from darktable_mcp.bridge.client import DEFAULT_TIMEOUTS, BridgeTimeoutError
 
@@ -579,8 +604,9 @@ async def test_handle_extract_previews_offloads():
         seen["thread"] = threading.get_ident()
         return {"items": [], "count": 0}
 
-    with patch("darktable_mcp.server.extract_previews", side_effect=slow_extract), patch(
-        "darktable_mcp.server.format_extract_summary", return_value="done"
+    with (
+        patch("darktable_mcp.server.extract_previews", side_effect=slow_extract),
+        patch("darktable_mcp.server.format_extract_summary", return_value="done"),
     ):
         server = DarktableMCPServer()
         result = await server._handle_extract_previews({"source_dir": "/raws"})
@@ -600,8 +626,9 @@ async def test_handle_apply_ratings_batch_offloads():
         seen["thread"] = threading.get_ident()
         return {"written": 1}
 
-    with patch("darktable_mcp.server.apply_ratings_batch", side_effect=slow_apply), patch(
-        "darktable_mcp.server.format_ratings_summary", return_value="done"
+    with (
+        patch("darktable_mcp.server.apply_ratings_batch", side_effect=slow_apply),
+        patch("darktable_mcp.server.format_ratings_summary", return_value="done"),
     ):
         server = DarktableMCPServer()
         result = await server._handle_apply_ratings_batch(
@@ -623,8 +650,9 @@ async def test_handle_open_in_darktable_offloads():
         seen["thread"] = threading.get_ident()
         return {"launched": True}
 
-    with patch("darktable_mcp.server.open_in_darktable", side_effect=slow_open), patch(
-        "darktable_mcp.server.format_open_summary", return_value="done"
+    with (
+        patch("darktable_mcp.server.open_in_darktable", side_effect=slow_open),
+        patch("darktable_mcp.server.format_open_summary", return_value="done"),
     ):
         server = DarktableMCPServer()
         result = await server._handle_open_in_darktable({"source_dir": "/raws"})
@@ -651,3 +679,525 @@ def test_import_from_camera_description_is_honest_about_cost():
 
     assert "synchronously" in desc
     assert ".import.log" in desc
+
+
+# ---------------------------------------------------------------------------
+# Golden snapshot of the agent-facing tool contract
+# ---------------------------------------------------------------------------
+#
+# The complete wire form of `tools/list`: for all ten tools, the exact name,
+# the exact description, and the exact inputSchema down to every `minimum`,
+# `maximum`, `default`, `enum`, `additionalProperties` and `required` entry.
+#
+# This exists because the descriptions ARE the contract. The calling model
+# reads them to decide behaviour, and several encode warnings that took real
+# incidents to learn: `force` is destructive, export output names are
+# de-collided, camera files land one subdirectory per card, a card import
+# blocks synchronously for up to an hour. A port that reworded any of that, or
+# quietly dropped a bound, would leave every unit test green and change what
+# the agent does.
+#
+# The literal below was captured from the pre-port (mcp 1.x) server and then
+# verified byte-for-byte against the mcp 2.x port, so it pins the 1.x contract,
+# not merely whatever the current code happens to emit. Update it only when the
+# tool surface is deliberately changed.
+
+EXPECTED_TOOL_CONTRACT: list[dict[str, Any]] = [
+    {
+        "name": "view_photos",
+        "description": (
+            "Browse photos in the user's darktable library. Filter by "
+            "filename substring, minimum star rating, or both. Returns id, "
+            "filename, absolute file path, and rating per match — the path "
+            "can be passed straight into export_images. Requires darktable "
+            "to be running with the darktable-mcp Lua plugin installed "
+            "(see darktable-mcp install-plugin)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "filter": {
+                    "type": "string",
+                    "description": "Substring filter on filename (case-insensitive)",
+                },
+                "rating_min": {
+                    "type": "integer",
+                    "minimum": -1,
+                    "maximum": 5,
+                    "description": "Minimum star rating to include",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "default": 100,
+                    "description": "Maximum number of photos to return",
+                },
+            },
+        },
+    },
+    {
+        "name": "rate_photos",
+        "description": (
+            "Apply a star rating to one or more photos in the user's "
+            "darktable library. Requires darktable to be running with the "
+            "darktable-mcp Lua plugin installed."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "photo_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                    },
+                    "description": "List of photo IDs (from view_photos)",
+                },
+                "rating": {
+                    "type": "integer",
+                    "minimum": -1,
+                    "maximum": 5,
+                    "description": "Star rating: -1=reject, 0=unrated, 1-5=stars",
+                },
+            },
+            "required": ["photo_ids", "rating"],
+        },
+    },
+    {
+        "name": "import_batch",
+        "description": (
+            "Register a folder as a film roll in the user's darktable "
+            "library. Useful when you've copied photos from a card or "
+            "external drive and want darktable to know about them. Returns "
+            "the count of newly-imported photos. Requires darktable to be "
+            "running with the darktable-mcp Lua plugin installed."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_path": {
+                    "type": "string",
+                    "description": "Absolute path to the folder of photos to import",
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Recurse into subdirectories (default true)",
+                },
+            },
+            "required": ["source_path"],
+        },
+    },
+    {
+        "name": "list_styles",
+        "description": (
+            "List all darktable styles (presets) installed on the user's "
+            "system. Returns name and description for each. Required "
+            "discovery step before calling apply_preset, since style names "
+            "must match exactly. Requires darktable to be running with the "
+            "darktable-mcp Lua plugin installed."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "apply_preset",
+        "description": (
+            "Apply a darktable style (preset) to one or more photos. The "
+            "preset_name must exactly match a style name from list_styles. "
+            "Returns counts of applied and missed photos. Requires "
+            "darktable to be running with the darktable-mcp Lua plugin "
+            "installed."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "photo_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                    },
+                    "description": "Photo IDs (from view_photos)",
+                },
+                "preset_name": {
+                    "type": "string",
+                    "description": "Style name (must match exactly; see list_styles)",
+                },
+            },
+            "required": ["photo_ids", "preset_name"],
+        },
+    },
+    {
+        "name": "import_from_camera",
+        "description": (
+            "Use when a camera or memory card is physically connected. "
+            "Detects the camera via libgphoto2 and copies all photos to a "
+            "local directory, then returns the destination path. Copying "
+            "alone does not put the photos in the library: follow up with "
+            "import_batch on that destination path to register them as a "
+            "film roll. Files are written one subdirectory per camera "
+            "folder or card, prefixed with the camera's identity (e.g. "
+            "<destination>/Nikon_D850_sn_30014567_store_00010001_DCIM_100NCD80/DSC_0001.NEF), "
+            "because camera filenames repeat across folders, across the "
+            "two cards of a dual-slot body, and across bodies importing "
+            "into the same destination. Import the destination "
+            "recursively. A file that would collide with a different photo "
+            "already on disk is kept alongside it as <name>-2.<ext>, never "
+            "overwritten. This holds for two bodies of the same model that "
+            "report no serial number and therefore share a subdirectory: "
+            "before skipping files a destination appears to already hold, "
+            "such a camera is asked for a small sample of them and the bytes "
+            "are compared, so a second body's photos are kept rather than "
+            "dropped. Re-running is cheap: a body with a serial number "
+            "transfers nothing it already delivered. Any file the card lists "
+            "that does not reach the destination is reported by name. "
+            "Cost: this tool runs to completion "
+            "synchronously and does not return early. A full card can take "
+            "many minutes, up to the 1 hour default timeout, which is "
+            "longer than most MCP clients wait for a single request. "
+            "Progress is observable while it runs by tailing the "
+            ".import.log file in the destination directory."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "destination": {
+                    "type": "string",
+                    "description": (
+                        "Target directory for copied files. Default: "
+                        "~/Pictures/import-YYYY-MM-DD/"
+                    ),
+                },
+                "camera_port": {
+                    "type": "string",
+                    "description": (
+                        "gphoto2 port string (e.g. 'usb:002,002'). Required when "
+                        "multiple cameras are connected."
+                    ),
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "minimum": 60,
+                    "description": (
+                        "Overall time budget for the transfer from one camera, shared "
+                        "across all of its folders (not per folder). Default: 3600 (1 "
+                        "hour). On timeout, re-run the tool to resume — already-copied "
+                        "files are skipped."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "extract_previews",
+        "description": (
+            "Extract auto-rotated JPEG previews from a directory of raw "
+            "files (NEF/CR2/ARW/DNG/etc) for vision-based rating. Each "
+            "preview is rotated upright via EXIF orientation and resized "
+            "to max_dim (default 1024). A smaller thumb_dim (default 384) "
+            "is also written for token-efficient first-pass culling. "
+            "Returns a list of items with preview paths plus an EXIF "
+            "summary (ISO, shutter, focal, aperture, datetime) per file. "
+            "The scan is recursive, and the output tree mirrors the source "
+            "tree, so raws with the same filename in different "
+            "subdirectories get distinct previews. Read the preview path "
+            "from each item rather than assuming <output_dir>/<stem>.jpg."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_dir": {
+                    "type": "string",
+                    "description": "Directory containing raw files",
+                },
+                "output_dir": {
+                    "type": "string",
+                    "description": "Where to write JPEGs. Default: <source_dir>/.previews/",
+                },
+                "max_dim": {
+                    "type": "integer",
+                    "minimum": 256,
+                    "maximum": 4096,
+                    "default": 1024,
+                    "description": "Longest-edge for the standard preview",
+                },
+                "thumb_dim": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1024,
+                    "default": 384,
+                    "description": "Thumb longest-edge; 0 to skip",
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Re-extract even if preview exists",
+                },
+                "max_workers": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 32,
+                    "description": (
+                        "Parallel decode workers. Default: min(8, cpu_count). Lower it "
+                        "if the machine is memory-constrained."
+                    ),
+                },
+            },
+            "required": ["source_dir"],
+        },
+    },
+    {
+        "name": "apply_ratings_batch",
+        "description": (
+            "Write XMP sidecars (xmp:Rating) for a batch of {stem: rating} "
+            "pairs. Each sidecar sits next to its raw file at <raw "
+            "path>.xmp and is picked up automatically by darktable on "
+            "import. Rating range: -1 (reject), 0 (unrated), 1-5 (stars). "
+            "Each rating is also appended to <source_dir>/ratings.jsonl "
+            "for replay/audit. An existing sidecar is never replaced: only "
+            "its rating value is rewritten, so darktable edit history "
+            "survives. A sidecar with no recognisable rating is skipped "
+            "with an error rather than overwritten."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_dir": {
+                    "type": "string",
+                    "description": "Directory holding the raw files",
+                },
+                "ratings": {
+                    "type": "object",
+                    "description": (
+                        "Map of file stem (e.g. 'DSC_1234') to rating int in [-1, 5]. "
+                        "When the same stem occurs in more than one subdirectory the "
+                        "bare stem is rejected as ambiguous — use a source-relative "
+                        "path instead (e.g. 'store_00010001_DCIM_100NCD80/DSC_1234')."
+                    ),
+                    "additionalProperties": {
+                        "type": "integer",
+                        "minimum": -1,
+                        "maximum": 5,
+                    },
+                },
+                "log": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Append entries to ratings.jsonl",
+                },
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Destructive: replace an existing sidecar wholesale instead of "
+                        "patching its rating. This discards any darktable edit history "
+                        "in that file. Only use when the user has explicitly asked to "
+                        "reset the sidecars."
+                    ),
+                },
+            },
+            "required": ["source_dir", "ratings"],
+        },
+    },
+    {
+        "name": "open_in_darktable",
+        "description": (
+            "Launch the darktable GUI on a folder. The folder is "
+            "registered as a film roll on first launch and XMP sidecars "
+            "are picked up automatically. The lighttable opens already "
+            "filtered via the official `darktable.gui.libs.collect.filter` "
+            "Lua API for any rating spec: exact `rating=N`, `rating_min=N` "
+            "(>=), `rating_max=N` (<=), arbitrary `rating_min..rating_max` "
+            "inner ranges, or no filter at all."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source_dir": {
+                    "type": "string",
+                    "description": "Folder containing the raw files",
+                },
+                "rating": {
+                    "type": "integer",
+                    "minimum": -1,
+                    "maximum": 5,
+                    "description": (
+                        "Filter to exactly this rating (-1=reject, 0=unrated, " "1-5=stars)"
+                    ),
+                },
+                "rating_min": {
+                    "type": "integer",
+                    "minimum": -1,
+                    "maximum": 5,
+                    "description": "Lower bound of a rating range",
+                },
+                "rating_max": {
+                    "type": "integer",
+                    "minimum": -1,
+                    "maximum": 5,
+                    "description": "Upper bound of a rating range",
+                },
+                "darktable_path": {
+                    "type": "string",
+                    "default": "darktable",
+                    "description": "darktable executable (default: 'darktable' on PATH)",
+                },
+            },
+            "required": ["source_dir"],
+        },
+    },
+    {
+        "name": "export_images",
+        "description": (
+            "Export photos to JPEG/PNG/TIFF via darktable-cli. Pass "
+            "absolute file paths in photo_ids — the `path` field from "
+            "view_photos drops in directly. Output names are de-collided: "
+            "two sources sharing a stem (e.g. DSC_0001.NEF from two "
+            "folders) get suffixed names rather than overwriting each "
+            "other, so do not assume the written file is <stem>.<format>. "
+            "Read the real path from the `output` field of the "
+            ".export_images.jsonl side file."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "photo_ids": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                    },
+                    "description": "Absolute paths to source images",
+                },
+                "output_path": {
+                    "type": "string",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["jpeg", "png", "tiff"],
+                },
+                "quality": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                },
+                "max_width": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Constrain the output width in pixels; aspect ratio is "
+                        "preserved. Omit for full resolution."
+                    ),
+                },
+                "max_height": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Constrain the output height in pixels; aspect ratio is "
+                        "preserved. Omit for full resolution."
+                    ),
+                },
+            },
+            "required": ["photo_ids", "output_path", "format"],
+        },
+    },
+]
+
+
+def _wire(tools: list[Tool]) -> list[dict[str, Any]]:
+    """The exact JSON a client sees for each tool, with unset fields omitted."""
+    return [t.model_dump(by_alias=True, exclude_none=True, mode="json") for t in tools]
+
+
+def _contract_drift(actual: list[dict[str, Any]], expected: list[dict[str, Any]]) -> str:
+    """A readable unified diff of the whole contract, golden vs. served."""
+
+    def render(contract: list[dict[str, Any]]) -> list[str]:
+        # sort_keys so a harmless key reordering never masquerades as drift;
+        # dict equality is order-insensitive, and so is this rendering.
+        return json.dumps(contract, indent=2, ensure_ascii=False, sort_keys=True).splitlines()
+
+    diff = difflib.unified_diff(
+        render(expected), render(actual), "golden (EXPECTED_TOOL_CONTRACT)", "served by the server"
+    )
+    return "\n".join(
+        [
+            "",
+            "TOOL CONTRACT DRIFT: what the server serves no longer matches the",
+            "golden snapshot in tests/test_server.py. A description reworded or a",
+            "schema constraint dropped here silently changes agent behaviour.",
+            "If the change is intentional, update EXPECTED_TOOL_CONTRACT.",
+            "",
+            *diff,
+        ]
+    )
+
+
+def test_tool_definitions_match_the_golden_contract():
+    actual = _wire(DarktableMCPServer()._tool_definitions())
+    assert actual == EXPECTED_TOOL_CONTRACT, _contract_drift(actual, EXPECTED_TOOL_CONTRACT)
+
+
+def test_golden_contract_covers_every_registered_tool():
+    """Guards the snapshot against a tool being added without being pinned."""
+    server = DarktableMCPServer()
+    assert [t["name"] for t in EXPECTED_TOOL_CONTRACT] == [
+        t.name for t in server._tool_definitions()
+    ]
+    assert {t["name"] for t in EXPECTED_TOOL_CONTRACT} == set(server.list_tools())
+
+
+@pytest.mark.asyncio
+async def test_serves_the_golden_contract_over_a_real_mcp_session():
+    """Drive the server through a real MCP session with the SDK's own client.
+
+    Every other test in this file calls handler methods directly, so none of
+    them touch the transport. This one performs the initialize handshake,
+    lists tools, and calls one end to end over the SDK's in-memory streams —
+    the only evidence that the mcp 2.x wiring (`on_list_tools` / `on_call_tool`
+    on the low-level `Server`) is actually connected.
+
+    `export_images` with an empty `photo_ids` is the safe end-to-end call: it
+    fails validation and returns before reaching darktable or darktable-cli.
+    """
+    server = DarktableMCPServer()
+
+    async with create_client_server_memory_streams() as (client_streams, server_streams):
+        async with anyio.create_task_group() as tg:
+
+            async def run_server() -> None:
+                await server.app.run(
+                    server_streams[0],
+                    server_streams[1],
+                    server.app.create_initialization_options(),
+                    raise_exceptions=True,
+                )
+
+            tg.start_soon(run_server)
+
+            async with ClientSession(client_streams[0], client_streams[1]) as session:
+                init = await session.initialize()
+                assert init.server_info.name == "darktable-mcp"
+                assert init.capabilities.tools is not None, "server advertised no tools capability"
+
+                listed = await session.list_tools()
+                served = _wire(listed.tools)
+                assert served == EXPECTED_TOOL_CONTRACT, _contract_drift(
+                    served, EXPECTED_TOOL_CONTRACT
+                )
+
+                result = await session.call_tool(
+                    "export_images",
+                    {"photo_ids": [], "output_path": "/nonexistent", "format": "jpeg"},
+                )
+
+            tg.cancel_scope.cancel()
+
+    assert isinstance(result, CallToolResult)
+    # A validation refusal is tool output, not a transport error — the same
+    # contract open_in_darktable depends on for its raised DarktableMCPError.
+    assert result.is_error is False
+    assert [c.text for c in result.content if isinstance(c, TextContent)] == [
+        "photo_ids must contain at least one path"
+    ]

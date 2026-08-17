@@ -9,7 +9,6 @@ Usage: venv/bin/python examples/smoke_test_filter.py
 """
 
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -54,10 +53,7 @@ def run_one_case(label: str, rating_kwargs: dict) -> tuple[bool, str]:
     # The bridge plugin is loaded; its "ready" message confirms Lua actually ran.
     bridge_ready = "darktable-mcp bridge: ready" in log_text
     # Look for LUA ERROR lines that aren't from unrelated noise.
-    lua_errors = [
-        line for line in log_text.splitlines()
-        if "LUA ERROR" in line
-    ]
+    lua_errors = [line for line in log_text.splitlines() if "LUA ERROR" in line]
     return (bridge_ready and not lua_errors, log_text if (lua_errors or not bridge_ready) else "")
 
 
@@ -74,7 +70,7 @@ def main() -> int:
         print(f"--- case: {label} ({kwargs}) ---")
         ok, log_excerpt = run_one_case(label, kwargs)
         if ok:
-            print(f"  OK")
+            print("  OK")
         else:
             failures.append((label, log_excerpt))
             print(f"  FAIL - see {LOG_PREFIX}{label}.log")

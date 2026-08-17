@@ -2,17 +2,39 @@
 
 import shutil
 import subprocess
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from darktable_mcp.tools.camera_tools import CameraTools
+from darktable_mcp.tools.camera_tools import CameraTools, _CameraFile
 from darktable_mcp.utils.errors import DarktableMCPError
 
 #: Captured before any patching so the tests that exercise the serial probe
 #: itself can reach the real implementation past the autouse stub below.
 _REAL_PROBE_SERIAL = CameraTools._probe_serial
+#: Same trick for the file listing, whose own tests need the real thing.
+_REAL_LIST_FILES = CameraTools._list_files_in_folder
+
+
+@pytest.fixture(autouse=True)
+def _no_file_listing():
+    """Keep `gphoto2 --list-files` away from real hardware in every test.
+
+    `_download_one_folder` asks the camera what a folder holds so it can
+    decide for itself what still needs transferring. Two reasons to stub it
+    by default: an unstubbed call would talk to a camera plugged into a
+    developer machine, and — because `patch("...subprocess.Popen")` replaces
+    the attribute on the shared subprocess module — it would otherwise be
+    answered by whatever Popen mock the test installed for the *download*.
+
+    The default is "no listing available", which is the degraded path: the
+    whole folder is pulled into staging and de-duplicated by content when it
+    is placed. Tests that want the cheap path patch this themselves.
+    """
+    with patch.object(CameraTools, "_list_files_in_folder", return_value=None):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -197,9 +219,7 @@ class TestCameraToolsListImageFolders:
 
     @patch("darktable_mcp.tools.camera_tools.subprocess.run")
     def test_list_dual_storage_returns_three_leaves(self, mock_run):
-        mock_run.return_value = Mock(
-            returncode=0, stdout=self.DUAL_STORAGE_OUTPUT, stderr=""
-        )
+        mock_run.return_value = Mock(returncode=0, stdout=self.DUAL_STORAGE_OUTPUT, stderr="")
         leaves = CameraTools()._list_image_folders("Nikon DSC D800E", "usb:002,002")
         assert leaves == [
             "/store_00010001/DCIM/101D800E",
@@ -253,23 +273,32 @@ class TestCameraToolsDownloadOneFolder:
 
     @patch("darktable_mcp.tools.camera_tools.subprocess.Popen")
     def test_download_one_folder_success(self, mock_popen, tmp_path):
-        mock_popen.return_value = _popen_mock(
-            stdout=(
-                "Saving file as /tmp/dest/IMG_0001.NEF\n"
-                "Saving file as /tmp/dest/IMG_0002.NEF\n"
-                "Saving file as /tmp/dest/IMG_0003.NEF\n"
-            ),
+        # CHANGED (staging fix): the returned count is now files that landed
+        # in the destination, not "Saving file as" lines gphoto2 printed, so
+        # the fake has to actually write them. That is the point of the
+        # change — the old count could not tell a saved file from a claim.
+        folder = "/store_00010001/DCIM/101D800E"
+        mock_popen.side_effect = _FakeGphoto2(
+            {folder: ["IMG_0001.NEF", "IMG_0002.NEF", "IMG_0003.NEF"]}
         )
         tools = CameraTools()
         count, skipped, errors = tools._download_one_folder(
             "Nikon DSC D800E",
             "usb:002,002",
-            "/store_00010001/DCIM/101D800E",
+            folder,
             tmp_path,
             timeout_seconds=600,
         )
         assert count == 3
         assert errors == []
+        assert sorted(
+            p.name
+            for p in (tmp_path / tools._camera_folder_tag("Nikon_DSC_D800E", folder)).iterdir()
+        ) == [
+            "IMG_0001.NEF",
+            "IMG_0002.NEF",
+            "IMG_0003.NEF",
+        ]
 
         cmd = mock_popen.call_args[0][0]
         assert cmd[0] == "gphoto2"
@@ -306,23 +335,32 @@ class TestCameraToolsDownloadOneFolder:
     def test_download_one_folder_handles_mixed_formats(self, mock_popen, tmp_path):
         """gphoto2's %C placeholder gives the correct extension per file,
         so the same call copies RAW + JPEG + video without per-format logic."""
-        mock_popen.return_value = _popen_mock(
-            stdout=(
-                "Saving file as /dest/IMG_0001.NEF\n"   # Nikon RAW
-                "Saving file as /dest/IMG_0001.JPG\n"   # JPEG sidecar
-                "Saving file as /dest/IMG_0002.CR2\n"   # Canon RAW
-                "Saving file as /dest/IMG_0003.CR3\n"   # Canon RAW (newer)
-                "Saving file as /dest/IMG_0004.ARW\n"   # Sony RAW
-                "Saving file as /dest/IMG_0005.RAF\n"   # Fuji RAW
-                "Saving file as /dest/IMG_0006.DNG\n"   # Adobe / Pentax / iPhone ProRAW
-                "Saving file as /dest/MVI_0007.MP4\n"   # Video
-            ),
+        # CHANGED (staging fix): a fake that writes the files, for the same
+        # reason as test_download_one_folder_success — the count measures
+        # placement now.
+        mock_popen.side_effect = _FakeGphoto2(
+            {
+                "/": [
+                    "IMG_0001.NEF",  # Nikon RAW
+                    "IMG_0001.JPG",  # JPEG sidecar
+                    "IMG_0002.CR2",  # Canon RAW
+                    "IMG_0003.CR3",  # Canon RAW (newer)
+                    "IMG_0004.ARW",  # Sony RAW
+                    "IMG_0005.RAF",  # Fuji RAW
+                    "IMG_0006.DNG",  # Adobe / Pentax / iPhone ProRAW
+                    "MVI_0007.MP4",  # Video
+                ]
+            }
         )
         log_path = tmp_path / "progress.log"
         with open(log_path, "w", encoding="utf-8") as log:
             count, skipped, errors = CameraTools()._download_one_folder(
-                "Some Camera", "usb:001,001", "/", tmp_path,
-                timeout_seconds=60, progress_log=log,
+                "Some Camera",
+                "usb:001,001",
+                "/",
+                tmp_path,
+                timeout_seconds=60,
+                progress_log=log,
             )
         assert count == 8
         assert errors == []
@@ -332,11 +370,11 @@ class TestCameraToolsDownloadOneFolder:
 
     @patch("darktable_mcp.tools.camera_tools.subprocess.Popen")
     def test_download_one_folder_partial_failure(self, mock_popen, tmp_path):
-        mock_popen.return_value = _popen_mock(
-            stdout=(
-                "Saving file as /tmp/dest/IMG_0001.NEF\n"
-                "Saving file as /tmp/dest/IMG_0002.NEF\n"
-            ),
+        # CHANGED (staging fix): same reason — the two files that did arrive
+        # have to exist for the count to see them. The third one erroring is
+        # still reported from stderr.
+        mock_popen.side_effect = _FakeGphoto2(
+            {"/": ["IMG_0001.NEF", "IMG_0002.NEF"]},
             stderr="ERROR: Could not download IMG_0003.NEF\n",
             returncode=1,
         )
@@ -401,9 +439,7 @@ class TestCameraToolsDownloadOneFolder:
             )
 
     @patch("darktable_mcp.tools.camera_tools.subprocess.Popen")
-    def test_download_one_folder_skip_existing_only_is_not_lock_error(
-        self, mock_popen, tmp_path
-    ):
+    def test_download_one_folder_skip_existing_only_is_not_lock_error(self, mock_popen, tmp_path):
         # When all files already exist on disk, gphoto2 prints "Skip
         # existing" lines and may still return rc=0 (or rc=1 in some
         # versions); either way, this is not a lock error. We must NOT
@@ -419,12 +455,11 @@ class TestCameraToolsDownloadOneFolder:
 
     @patch("darktable_mcp.tools.camera_tools.subprocess.Popen")
     def test_download_one_folder_writes_progress_lines_to_log(self, mock_popen, tmp_path):
-        mock_popen.return_value = _popen_mock(
-            stdout=(
-                "Saving file as /dest/A.NEF\n"
-                "Saving file as /dest/B.NEF\n"
-            ),
-        )
+        # CHANGED (staging fix): a writing fake, so the returned count still
+        # reflects two files. The log lines themselves are unchanged — they
+        # are still written from gphoto2's stream as the transfer happens,
+        # which is what `tail -f` depends on.
+        mock_popen.side_effect = _FakeGphoto2({"/": ["A.NEF", "B.NEF"]})
         log_path = tmp_path / "progress.log"
         with open(log_path, "w", encoding="utf-8") as log:
             count, _, _ = CameraTools()._download_one_folder(
@@ -481,14 +516,22 @@ class TestCameraToolsFolderLayout:
         # camera, because the folder path alone is generic across bodies.
         # A direct caller that passes no identity gets the model-derived
         # one — never a bare folder tag.
+        # CHANGED (staging fix): gphoto2 no longer writes into the
+        # destination at all. It writes into a private per-run directory
+        # under it, and the files are moved into `<dest>/<tag>/` afterwards
+        # by logic that can see what is already there. The tag still has to
+        # be in the path, so it is still pinned here.
         tag = "Nikon_DSC_D800E_store_00010001_DCIM_101D800E"
-        assert pattern == f"{tmp_path}/{tag}/%f.%C"
+        relative = Path(pattern).relative_to(tmp_path)
+        assert relative.parts[0] == CameraTools.STAGING_DIR_NAME
+        assert relative.parts[2] == tag
+        assert pattern.endswith("%f.%C")
         assert (tmp_path / tag).is_dir()
+        # And the staging directory does not survive the call.
+        assert not (tmp_path / CameraTools.STAGING_DIR_NAME).exists()
 
     @patch("darktable_mcp.tools.camera_tools.subprocess.Popen")
-    def test_root_fallback_pattern_uses_camera_folder_placeholder(
-        self, mock_popen, tmp_path
-    ):
+    def test_root_fallback_pattern_uses_camera_folder_placeholder(self, mock_popen, tmp_path):
         # When folder enumeration failed we do one recursive pull from "/".
         # gphoto2's own %F (camera folder path) keeps that recursion from
         # flattening two folders onto each other.
@@ -501,9 +544,15 @@ class TestCameraToolsFolderLayout:
         # CHANGED (camera-identity fix): the recursive-fallback directory is
         # per-camera too, so two bodies falling back on the same day do not
         # both pour into <dest>/camera/.
-        assert pattern == (
-            f"{tmp_path}/Nikon_DSC_D800E_{CameraTools.ROOT_FOLDER_TAG}/%F/%f.%C"
-        )
+        # CHANGED (staging fix): that directory is now reached in two steps,
+        # via staging. %F is still in the pattern — the recursion must not
+        # flatten two camera folders onto each other inside staging either,
+        # and the relative tree is preserved when the files are placed.
+        tag = f"Nikon_DSC_D800E_{CameraTools.ROOT_FOLDER_TAG}"
+        relative = Path(pattern).relative_to(tmp_path)
+        assert relative.parts[0] == CameraTools.STAGING_DIR_NAME
+        assert relative.parts[2] == tag
+        assert pattern.endswith("%F/%f.%C")
 
 
 class _FakeGphoto2:
@@ -513,10 +562,21 @@ class _FakeGphoto2:
     `%f` / `%C` / `%F` placeholders the same way gphoto2 does and writes one
     file per photo in that camera folder. `--skip-existing` is honoured per
     resolved target path — which is exactly the mechanism that used to eat
-    photos when every folder resolved into the same directory.
+    photos when every folder resolved into the same directory, and which the
+    fix demotes to a same-run guard inside a private staging directory.
+
+    Also answers `--list-files` (via the `run` method, wired to
+    `subprocess.run`) and honours `--get-file <range>`, so a test can watch
+    the tool fetch *some* of a folder instead of all of it. `fetched` records
+    every filename the fake was actually asked to transfer, which is how the
+    cheap-resume tests prove that nothing came down the wire.
     """
 
-    def __init__(self, tree, marker=""):
+    #: Every photo is this many bytes unless `sizes` says otherwise. Two
+    #: bodies' `DSC_0001.NEF` are the same length on purpose.
+    DEFAULT_SIZE = 64
+
+    def __init__(self, tree, marker="", sizes=None, stderr="", returncode=0, refuse=()):
         """Build a fake camera.
 
         Args:
@@ -526,32 +586,78 @@ class _FakeGphoto2:
                 different photos at byte-identical camera paths — the file
                 bodies differ while the byte size stays the same, which is
                 the shape that defeats every size-based comparison.
+            sizes: optional filename -> byte size overrides.
+            stderr: stderr text for the download invocation.
+            returncode: exit status for the download invocation.
+            refuse: filenames the camera lists but will not hand over, i.e.
+                a read error on one photo of an otherwise healthy card.
         """
         self.tree = tree
         self.marker = marker
+        self.sizes = sizes or {}
+        self.stderr = stderr
+        self.returncode = returncode
+        self.refuse = set(refuse)
         self.calls = []
+        self.fetched = []
+
+    def _size(self, name):
+        return self.sizes.get(name, self.DEFAULT_SIZE)
+
+    def _body(self, folder, name):
+        return f"{self.marker}{folder}/{name}".ljust(self._size(name))[: self._size(name)]
+
+    @staticmethod
+    def _selected(cmd, count):
+        """Which 1-based file numbers this invocation asks for."""
+        if "--get-all-files" in cmd:
+            return list(range(1, count + 1))
+        spec = cmd[cmd.index("--get-file") + 1]
+        wanted = []
+        for span in spec.split(","):
+            if "-" in span:
+                first, last = span.split("-")
+                wanted.extend(range(int(first), int(last) + 1))
+            else:
+                wanted.append(int(span))
+        return wanted
+
+    def run(self, cmd, **kwargs):
+        """`subprocess.run` side effect: answers `--list-files`."""
+        self.calls.append(cmd)
+        folder = cmd[cmd.index("--folder") + 1]
+        names = self.tree.get(folder, [])
+        lines = [f"There are {len(names)} files in folder '{folder}'.\n"]
+        for position, name in enumerate(names, start=1):
+            # Mirrors gphoto2's own columns, including its whole-KB sizes.
+            lines.append(
+                f"#{position:<5} {name:<27} rd  {self._size(name) // 1024} KB image/x-raw\n"
+            )
+        return Mock(returncode=0, stdout="".join(lines), stderr="")
 
     def __call__(self, cmd, **kwargs):
         self.calls.append(cmd)
         folder = cmd[cmd.index("--folder") + 1]
         pattern = cmd[cmd.index("--filename") + 1]
         skip_existing = "--skip-existing" in cmd
+        names = self.tree.get(folder, [])
         lines = []
-        for name in self.tree.get(folder, []):
+        for position in self._selected(cmd, len(names)):
+            name = names[position - 1]
+            if name in self.refuse:
+                continue
             stem, _, ext = name.rpartition(".")
             target = Path(
-                pattern.replace("%F", folder.strip("/"))
-                .replace("%f", stem)
-                .replace("%C", ext)
+                pattern.replace("%F", folder.strip("/")).replace("%f", stem).replace("%C", ext)
             )
             if skip_existing and target.exists():
                 lines.append(f"Skip existing file {target}\n")
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            # Same byte length for both cards' DSC_0001.NEF on purpose.
-            target.write_text(f"{self.marker}{folder}/{name}"[:64].ljust(64))
+            target.write_text(self._body(folder, name))
+            self.fetched.append(name)
             lines.append(f"Saving file as {target}\n")
-        return _popen_mock(stdout="".join(lines))
+        return _popen_mock(stdout="".join(lines), stderr=self.stderr, returncode=self.returncode)
 
 
 class TestCameraToolsNoFilenameCollisions:
@@ -602,9 +708,7 @@ class TestCameraToolsNoFilenameCollisions:
 
         # Second run over an unchanged card: nothing new, everything skipped.
         mock_popen.side_effect = _FakeGphoto2(self.TREE)
-        saved, skipped, errors = tools._download_from_camera(
-            "Nikon D850", "usb:002,002", tmp_path
-        )
+        saved, skipped, errors = tools._download_from_camera("Nikon D850", "usb:002,002", tmp_path)
         assert saved == 0
         assert skipped == 2
         assert errors == []
@@ -647,9 +751,7 @@ class TestCameraToolsOverallTimeoutBudget:
         mock_download.return_value = (1, 0, [])
         # Fake clock: 40 s elapse during the first folder.
         ticks = iter([0.0, 0.0, 40.0, 40.0])
-        monkeypatch.setattr(
-            "darktable_mcp.tools.camera_tools.time.monotonic", lambda: next(ticks)
-        )
+        monkeypatch.setattr("darktable_mcp.tools.camera_tools.time.monotonic", lambda: next(ticks))
         CameraTools()._download_from_camera(
             "Nikon DSC D800E", "usb:002,002", tmp_path, timeout_seconds=100
         )
@@ -665,9 +767,7 @@ class TestCameraToolsOverallTimeoutBudget:
         mock_list.return_value = ["/a", "/b", "/c"]
         mock_download.return_value = (2, 0, [])
         ticks = iter([0.0, 0.0, 999.0, 999.0])
-        monkeypatch.setattr(
-            "darktable_mcp.tools.camera_tools.time.monotonic", lambda: next(ticks)
-        )
+        monkeypatch.setattr("darktable_mcp.tools.camera_tools.time.monotonic", lambda: next(ticks))
         saved, _skipped, errors = CameraTools()._download_from_camera(
             "Nikon DSC D800E", "usb:002,002", tmp_path, timeout_seconds=100
         )
@@ -695,26 +795,17 @@ class TestCameraToolsCountFilesInFolder:
     @patch("darktable_mcp.tools.camera_tools.subprocess.run")
     def test_count_returns_none_on_nonzero_exit(self, mock_run):
         mock_run.return_value = Mock(returncode=1, stdout="", stderr="error")
-        assert (
-            CameraTools()._count_files_in_folder("Nikon DSC D800E", "usb:002,002", "/")
-            is None
-        )
+        assert CameraTools()._count_files_in_folder("Nikon DSC D800E", "usb:002,002", "/") is None
 
     @patch("darktable_mcp.tools.camera_tools.subprocess.run")
     def test_count_returns_none_on_unparseable_output(self, mock_run):
         mock_run.return_value = Mock(returncode=0, stdout="weird output", stderr="")
-        assert (
-            CameraTools()._count_files_in_folder("Nikon DSC D800E", "usb:002,002", "/")
-            is None
-        )
+        assert CameraTools()._count_files_in_folder("Nikon DSC D800E", "usb:002,002", "/") is None
 
     @patch("darktable_mcp.tools.camera_tools.subprocess.run")
     def test_count_returns_none_on_timeout(self, mock_run):
         mock_run.side_effect = subprocess.TimeoutExpired(cmd=["gphoto2"], timeout=30)
-        assert (
-            CameraTools()._count_files_in_folder("Nikon DSC D800E", "usb:002,002", "/")
-            is None
-        )
+        assert CameraTools()._count_files_in_folder("Nikon DSC D800E", "usb:002,002", "/") is None
 
     @patch("darktable_mcp.tools.camera_tools.subprocess.run")
     def test_count_raises_when_gphoto2_missing(self, mock_run):
@@ -729,9 +820,7 @@ class TestCameraToolsDownloadFromCamera:
     @patch.object(CameraTools, "_count_files_in_folder", return_value=None)
     @patch.object(CameraTools, "_download_one_folder")
     @patch.object(CameraTools, "_list_image_folders")
-    def test_iterates_each_storage_leaf(
-        self, mock_list, mock_download, _mock_count, tmp_path
-    ):
+    def test_iterates_each_storage_leaf(self, mock_list, mock_download, _mock_count, tmp_path):
         mock_list.return_value = [
             "/store_00010001/DCIM/101D800E",
             "/store_00020001/DCIM/101D800E",
@@ -794,16 +883,12 @@ class TestCameraToolsDownloadFromCamera:
             "Could not access camera at usb:002,002. Another process is holding it."
         )
         with pytest.raises(DarktableMCPError, match="Another process"):
-            CameraTools()._download_from_camera(
-                "Nikon DSC D800E", "usb:002,002", tmp_path
-            )
+            CameraTools()._download_from_camera("Nikon DSC D800E", "usb:002,002", tmp_path)
 
     @patch.object(CameraTools, "_count_files_in_folder", return_value=None)
     @patch.object(CameraTools, "_download_one_folder")
     @patch.object(CameraTools, "_list_image_folders")
-    def test_creates_destination(
-        self, mock_list, mock_download, _mock_count, tmp_path
-    ):
+    def test_creates_destination(self, mock_list, mock_download, _mock_count, tmp_path):
         mock_list.return_value = ["/"]
         mock_download.return_value = (0, 0, [])
         target = tmp_path / "new_dir"
@@ -847,9 +932,7 @@ class TestCameraToolsDownloadFromCamera:
         mock_list.return_value = ["/store/DCIM/101"]
         mock_count.return_value = 5
         mock_download.return_value = (5, 0, [])
-        CameraTools()._download_from_camera(
-            "Nikon DSC D800E", "usb:002,002", tmp_path
-        )
+        CameraTools()._download_from_camera("Nikon DSC D800E", "usb:002,002", tmp_path)
         log_path = tmp_path / ".import.log"
         assert log_path.exists()
         body = log_path.read_text()
@@ -893,9 +976,7 @@ class TestCameraToolsDownloadFromCamera:
     ):
         mock_list.return_value = ["/a"]
         mock_download.return_value = (0, 0, [])
-        CameraTools()._download_from_camera(
-            "Nikon DSC D800E", "usb:002,002", tmp_path
-        )
+        CameraTools()._download_from_camera("Nikon DSC D800E", "usb:002,002", tmp_path)
         # progress_log must be passed in so per-file progress can be streamed
         kwargs = mock_download.call_args.kwargs
         assert "progress_log" in kwargs
@@ -1019,9 +1100,7 @@ class TestCameraToolsImportFromCamera:
 
     @patch.object(CameraTools, "_download_from_camera")
     @patch.object(CameraTools, "_detect_cameras")
-    def test_timeout_seconds_argument_flows_to_download(
-        self, mock_detect, mock_download, tmp_path
-    ):
+    def test_timeout_seconds_argument_flows_to_download(self, mock_detect, mock_download, tmp_path):
         mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
         mock_download.return_value = (1, 0, [])
 
@@ -1043,13 +1122,10 @@ class TestCameraToolsImportFromCamera:
 
     @patch.object(CameraTools, "_download_from_camera")
     @patch.object(CameraTools, "_detect_cameras")
-    def test_shortfall_is_prominent_in_summary(
-        self, mock_detect, mock_download, tmp_path
-    ):
+    def test_shortfall_is_prominent_in_summary(self, mock_detect, mock_download, tmp_path):
         mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
         shortfall = (
-            f"{CameraTools.SHORTFALL_PREFIX} 90/100 files in destination "
-            "— 10 short of expected"
+            f"{CameraTools.SHORTFALL_PREFIX} 90/100 files in destination " "— 10 short of expected"
         )
         mock_download.return_value = (90, 0, [shortfall])
         summary = CameraTools().import_from_camera({"destination": str(tmp_path)})
@@ -1062,9 +1138,7 @@ class TestCameraToolsImportFromCamera:
 
     @patch.object(CameraTools, "_download_from_camera")
     @patch.object(CameraTools, "_detect_cameras")
-    def test_partial_detect_warning_is_surfaced(
-        self, mock_detect, mock_download, tmp_path
-    ):
+    def test_partial_detect_warning_is_surfaced(self, mock_detect, mock_download, tmp_path):
         def detect(_self=None):
             tools.last_detect_warning = "gphoto2 --auto-detect exited with code 1 ..."
             return [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
@@ -1104,23 +1178,26 @@ class TestCameraToolsMSCHelpers:
         assert CameraTools._is_msc_port("") is False
 
     def test_msc_mount_strips_prefix(self):
-        assert CameraTools._msc_mount("disk:/media/user/NIKON D800E") == \
-            __import__("pathlib").Path("/media/user/NIKON D800E")
+        assert CameraTools._msc_mount("disk:/media/user/NIKON D800E") == __import__("pathlib").Path(
+            "/media/user/NIKON D800E"
+        )
 
     def test_msc_matches_ptp_for_nikon_hybrid(self):
         # The exact case from the real session: mount basename "NIKON
         # D800E" must match PTP model "Nikon DSC D800E" via shared 4+ char
         # tokens {"NIKON", "D800E"}.
-        assert CameraTools._msc_matches_ptp(
-            "disk:/media/andrii/NIKON D800E", "Nikon DSC D800E"
-        ) is True
+        assert (
+            CameraTools._msc_matches_ptp("disk:/media/andrii/NIKON D800E", "Nikon DSC D800E")
+            is True
+        )
 
     def test_msc_matches_ptp_rejects_unrelated_camera(self):
         # A Canon card in a card reader must NOT be paired with a Nikon
         # camera connected on PTP.
-        assert CameraTools._msc_matches_ptp(
-            "disk:/media/andrii/EOS_R5_DCIM", "Nikon DSC D800E"
-        ) is False
+        assert (
+            CameraTools._msc_matches_ptp("disk:/media/andrii/EOS_R5_DCIM", "Nikon DSC D800E")
+            is False
+        )
 
     def test_msc_matches_ptp_returns_false_for_non_disk_port(self):
         assert CameraTools._msc_matches_ptp("usb:002,003", "anything") is False
@@ -1182,10 +1259,13 @@ class TestCameraToolsDownloadFromMSC:
     def test_walks_dcim_subfolders_and_copies_all_files(self, tmp_path):
         mount = tmp_path / "card"
         dest = tmp_path / "out"
-        self._make_dcim(mount, {
-            "100D800E": ["DSC_0001.NEF", "DSC_0002.NEF"],
-            "101D800E": ["DSC_0003.NEF"],
-        })
+        self._make_dcim(
+            mount,
+            {
+                "100D800E": ["DSC_0001.NEF", "DSC_0002.NEF"],
+                "101D800E": ["DSC_0003.NEF"],
+            },
+        )
         saved, skipped, errors = CameraTools()._download_from_msc(mount, dest)
         assert saved == 3
         assert skipped == 0
@@ -1237,10 +1317,13 @@ class TestCameraToolsDownloadFromMSC:
         # the old `dst.exists() and same size` test threw away.
         mount = tmp_path / "card"
         dest = tmp_path / "out"
-        self._make_dcim(mount, {
-            "100NCD80": ["DSC_0001.NEF"],
-            "101NCD80": ["DSC_0001.NEF"],
-        })
+        self._make_dcim(
+            mount,
+            {
+                "100NCD80": ["DSC_0001.NEF"],
+                "101NCD80": ["DSC_0001.NEF"],
+            },
+        )
         (mount / "DCIM" / "100NCD80" / "DSC_0001.NEF").write_bytes(b"first-photo!")
         (mount / "DCIM" / "101NCD80" / "DSC_0001.NEF").write_bytes(b"second-photo")
 
@@ -1267,9 +1350,7 @@ class TestCameraToolsDownloadFromMSC:
         assert errors == []
         assert len(list(dest.rglob("*.NEF"))) == 2
 
-    def test_timeout_budget_aborts_with_partial_progress_error(
-        self, tmp_path, monkeypatch
-    ):
+    def test_timeout_budget_aborts_with_partial_progress_error(self, tmp_path, monkeypatch):
         # A flaky reader must not stall the import for an hour with no
         # explanation: the budget is checked between files.
         mount = tmp_path / "card"
@@ -1278,12 +1359,8 @@ class TestCameraToolsDownloadFromMSC:
         # Clock: deadline calc, then one check per file. Budget blows after
         # the first file is copied.
         ticks = iter([0.0, 0.0, 500.0])
-        monkeypatch.setattr(
-            "darktable_mcp.tools.camera_tools.time.monotonic", lambda: next(ticks)
-        )
-        saved, skipped, errors = CameraTools()._download_from_msc(
-            mount, dest, timeout_seconds=120
-        )
+        monkeypatch.setattr("darktable_mcp.tools.camera_tools.time.monotonic", lambda: next(ticks))
+        saved, skipped, errors = CameraTools()._download_from_msc(mount, dest, timeout_seconds=120)
         assert saved == 1
         assert len(errors) == 1
         assert "Timed out after 120 s" in errors[0]
@@ -1316,9 +1393,7 @@ class TestCameraToolsHybridDispatch:
         self, mock_msc, _mock_list, _mock_count, mock_download, tmp_path
     ):
         mock_download.return_value = (3, 0, [])
-        CameraTools()._download_from_camera(
-            "Nikon DSC D800E", "usb:002,003", tmp_path
-        )
+        CameraTools()._download_from_camera("Nikon DSC D800E", "usb:002,003", tmp_path)
         mock_msc.assert_not_called()
 
 
@@ -1359,10 +1434,12 @@ class TestCameraToolsImportFromCameraHybrid:
         tools = CameraTools()
         # Picking the MSC port still pulls the whole group (because the
         # pair is one logical device).
-        tools.import_from_camera({
-            "destination": str(tmp_path),
-            "camera_port": "disk:/media/user/NIKON D800E",
-        })
+        tools.import_from_camera(
+            {
+                "destination": str(tmp_path),
+                "camera_port": "disk:/media/user/NIKON D800E",
+            }
+        )
         assert mock_download.call_count == 2
 
     @patch.object(CameraTools, "_download_from_camera")
@@ -1436,9 +1513,7 @@ class TestCameraToolsSerialProbe:
 
     @patch("darktable_mcp.tools.camera_tools.subprocess.run")
     def test_all_zero_serial_is_not_an_identity(self, mock_run):
-        mock_run.return_value = Mock(
-            returncode=0, stdout="Current: 0000000000000000\n", stderr=""
-        )
+        mock_run.return_value = Mock(returncode=0, stdout="Current: 0000000000000000\n", stderr="")
         assert _REAL_PROBE_SERIAL(CameraTools(), "Some Camera", "usb:001,001") is None
 
     @patch("darktable_mcp.tools.camera_tools.subprocess.run")
@@ -1551,15 +1626,11 @@ class TestCameraToolsCrossCameraCollisions:
         tools = CameraTools()
         serials = {"usb:002,002": "30014567", "usb:002,005": "30019999"}
 
-        with patch.object(
-            CameraTools, "_probe_serial", side_effect=lambda m, p: serials[p]
-        ):
+        with patch.object(CameraTools, "_probe_serial", side_effect=lambda m, p: serials[p]):
             mock_popen.side_effect = _FakeGphoto2(self.TREE, marker="BODY-A-")
             tools._download_from_camera("Nikon D850", "usb:002,002", tmp_path)
             mock_popen.side_effect = _FakeGphoto2(self.TREE, marker="BODY-B-")
-            saved, skipped, _ = tools._download_from_camera(
-                "Nikon D850", "usb:002,005", tmp_path
-            )
+            saved, skipped, _ = tools._download_from_camera("Nikon D850", "usb:002,005", tmp_path)
 
         assert (saved, skipped) == (1, 0)
         landed = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*.NEF"))
@@ -1619,9 +1690,7 @@ class TestCameraToolsCrossCameraCollisions:
     ):
         mock_list.return_value = ["/a", "/b", "/c"]
         mock_download.return_value = (1, 0, [])
-        with patch.object(
-            CameraTools, "_probe_serial", return_value="30014567"
-        ) as mock_probe:
+        with patch.object(CameraTools, "_probe_serial", return_value="30014567") as mock_probe:
             CameraTools()._download_from_camera("Nikon D850", "usb:002,002", tmp_path)
         assert mock_download.call_count == 3
         assert mock_probe.call_count == 1
@@ -1714,9 +1783,7 @@ class TestCameraToolsDistinctName:
         assert CameraTools._distinct_name("RAWFILE", 2) == "RAWFILE-2"
 
     def test_only_the_last_dot_is_treated_as_the_extension(self):
-        assert CameraTools._distinct_name("IMG_0001.sidecar.xmp", 2) == (
-            "IMG_0001.sidecar-2.xmp"
-        )
+        assert CameraTools._distinct_name("IMG_0001.sidecar.xmp", 2) == ("IMG_0001.sidecar-2.xmp")
 
 
 class TestCameraToolsMSCNeverDestroys:
@@ -1779,9 +1846,7 @@ class TestCameraToolsMSCNeverDestroys:
     def test_same_size_rerun_still_skips_and_reports_the_skip_count(self, tmp_path):
         mount = tmp_path / "card"
         dest = tmp_path / "out"
-        self._card(
-            mount, "100D800E", {"A.NEF": b"photo-one!!", "B.NEF": b"photo-two!!"}
-        )
+        self._card(mount, "100D800E", {"A.NEF": b"photo-one!!", "B.NEF": b"photo-two!!"})
         tools = CameraTools()
         assert tools._download_from_msc(mount, dest)[:2] == (2, 0)
 
@@ -1909,12 +1974,486 @@ class TestCameraToolsImportReportsNameConflicts:
 
     @patch.object(CameraTools, "_download_from_camera")
     @patch.object(CameraTools, "_detect_cameras")
-    def test_clean_import_has_no_conflict_section(
-        self, mock_detect, mock_download, tmp_path
-    ):
-        mock_detect.return_value = [
-            {"model": "Nikon DSC D800E", "port": "usb:002,002"}
-        ]
+    def test_clean_import_has_no_conflict_section(self, mock_detect, mock_download, tmp_path):
+        mock_detect.return_value = [{"model": "Nikon DSC D800E", "port": "usb:002,002"}]
         mock_download.return_value = (5, 0, [])
         summary = CameraTools().import_from_camera({"destination": str(tmp_path)})
         assert "name conflict" not in summary
+
+
+def _run_ptp_import(
+    fake,
+    destination,
+    folders,
+    model="Nikon D850",
+    port="usb:002,002",
+    serial=None,
+    tools=None,
+    expected=None,
+):
+    """Drive one whole PTP import against a fake camera.
+
+    Wires the fake to both halves of the gphoto2 CLI — `subprocess.run` for
+    `--list-files`, `subprocess.Popen` for the transfers — and restores the
+    real `_list_files_in_folder`, which the autouse fixture stubs out. The
+    folder walk and the `--num-files` pre-flight are stubbed because they
+    would otherwise be answered by the same `subprocess.run` mock.
+
+    Args:
+        fake: a `_FakeGphoto2`.
+        destination: import root.
+        folders: what `_list_image_folders` should report.
+        model: gphoto2 model string.
+        port: gphoto2 port string.
+        serial: what the body reports for `serialnumber`. None is the
+            interesting case — that is the body that cannot be told apart
+            from another of the same model.
+        tools: reuse an existing CameraTools instance if given.
+        expected: what `--num-files` reports per folder.
+
+    Returns:
+        Whatever `_download_from_camera` returns.
+    """
+    tools = tools or CameraTools()
+    patches = [
+        patch.object(CameraTools, "_list_image_folders", return_value=folders),
+        patch.object(CameraTools, "_count_files_in_folder", return_value=expected),
+        patch.object(CameraTools, "_list_files_in_folder", _REAL_LIST_FILES),
+        patch.object(CameraTools, "_probe_serial", return_value=serial),
+        patch("darktable_mcp.tools.camera_tools.subprocess.run", side_effect=fake.run),
+        patch("darktable_mcp.tools.camera_tools.subprocess.Popen", side_effect=fake),
+    ]
+    with ExitStack() as stack:
+        for item in patches:
+            stack.enter_context(item)
+        return tools._download_from_camera(model, port, destination)
+
+
+def _transfer_calls(fake):
+    """The gphoto2 invocations that actually moved data off the camera."""
+    return [c for c in fake.calls if "--get-all-files" in c or "--get-file" in c]
+
+
+class TestCameraToolsListFilesParsing:
+    """`--list-files` is the resume mechanism now, so its parser is load-bearing."""
+
+    @patch("darktable_mcp.tools.camera_tools.subprocess.run")
+    def test_parses_gphoto2_columns_including_kilobyte_sizes(self, mock_run):
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout=(
+                "There are 2 files in folder '/store_00010001/DCIM/100NCD80'.\n"
+                "#1     DSC_0001.NEF               rd  9863 KB image/x-nikon-nef\n"
+                "#2     DSC_0002.NEF               rd  9871 KB image/x-nikon-nef\n"
+            ),
+            stderr="",
+        )
+        entries = _REAL_LIST_FILES(
+            CameraTools(), "Nikon D850", "usb:002,002", "/store_00010001/DCIM/100NCD80"
+        )
+        assert [(e.number, e.name, e.size_kb) for e in entries] == [
+            (1, "DSC_0001.NEF", 9863),
+            (2, "DSC_0002.NEF", 9871),
+        ]
+        cmd = mock_run.call_args[0][0]
+        assert "--list-files" in cmd
+        assert "/store_00010001/DCIM/100NCD80" in cmd
+
+    @patch("darktable_mcp.tools.camera_tools.subprocess.run")
+    def test_raw_byte_sizes_are_normalised_to_kilobytes(self, mock_run):
+        # Not every build prints KB. A bare byte count must not be read as
+        # kilobytes, or every size compare would be off by a factor of 1024
+        # and nothing would ever be recognised as already copied.
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout="#1     IMG_0001.JPG               rd  2097152 image/jpeg\n",
+            stderr="",
+        )
+        entries = _REAL_LIST_FILES(CameraTools(), "Some Camera", "usb:001,001", "/")
+        assert entries[0].size_kb == 2048
+
+    @patch("darktable_mcp.tools.camera_tools.subprocess.run")
+    def test_line_without_a_size_yields_unknown_not_zero(self, mock_run):
+        mock_run.return_value = Mock(
+            returncode=0,
+            stdout="#1     DSC_0001.NEF               rd  image/x-nikon-nef\n",
+            stderr="",
+        )
+        entries = _REAL_LIST_FILES(CameraTools(), "Nikon D850", "usb:002,002", "/x")
+        assert entries[0].size_kb is None
+
+    @patch("darktable_mcp.tools.camera_tools.subprocess.run")
+    def test_nonzero_exit_degrades_to_none(self, mock_run):
+        mock_run.return_value = Mock(returncode=1, stdout="", stderr="*** Error ***\n")
+        assert _REAL_LIST_FILES(CameraTools(), "Nikon D850", "usb:002,002", "/x") is None
+
+    @patch("darktable_mcp.tools.camera_tools.subprocess.run")
+    def test_unparseable_output_degrades_to_none(self, mock_run):
+        mock_run.return_value = Mock(returncode=0, stdout="weird output\n", stderr="")
+        assert _REAL_LIST_FILES(CameraTools(), "Nikon D850", "usb:002,002", "/x") is None
+
+    @patch("darktable_mcp.tools.camera_tools.subprocess.run")
+    def test_missing_binary_degrades_instead_of_raising(self, mock_run):
+        # Like the serial probe: the listing is an optimisation, and losing
+        # it must cost speed, not the import.
+        mock_run.side_effect = FileNotFoundError("gphoto2")
+        assert _REAL_LIST_FILES(CameraTools(), "Nikon D850", "usb:002,002", "/x") is None
+
+    @patch("darktable_mcp.tools.camera_tools.subprocess.run")
+    def test_timeout_degrades_to_none(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["gphoto2"], timeout=60)
+        assert _REAL_LIST_FILES(CameraTools(), "Nikon D850", "usb:002,002", "/x") is None
+
+
+class TestCameraToolsRangeExpression:
+    """`--get-file` takes gphoto2's RANGE syntax; a wrong range fetches wrong files."""
+
+    def test_consecutive_numbers_collapse_into_a_span(self):
+        assert CameraTools._range_expression([1, 2, 3]) == "1-3"
+
+    def test_gaps_are_preserved(self):
+        assert CameraTools._range_expression([1, 3, 4, 5, 9]) == "1,3-5,9"
+
+    def test_unordered_input_is_sorted_and_deduplicated(self):
+        assert CameraTools._range_expression([5, 1, 5, 2]) == "1-2,5"
+
+    def test_empty_selection_is_empty(self):
+        assert CameraTools._range_expression([]) == ""
+
+
+class TestCameraToolsIdentityStrength:
+    """Only a serial number makes an identity unique to one physical body."""
+
+    def test_serial_identity_is_unique(self):
+        assert CameraTools._identity_is_body_unique("Nikon_D850_sn_30014567") is True
+
+    def test_model_only_identity_is_not_unique(self):
+        assert CameraTools._identity_is_body_unique("Nikon_D850") is False
+
+    def test_empty_identity_is_not_unique(self):
+        assert CameraTools._identity_is_body_unique("") is False
+
+    def test_a_model_word_spelled_sn_is_not_a_serial(self):
+        # `_model_tag` upper-cases nothing, but model words arrive as the
+        # camera spells them. The marker this checks for is the literal
+        # lower-case `sn_` prefix `_camera_identity` writes.
+        assert CameraTools._identity_is_body_unique("Canon_SN_5") is False
+
+
+class TestCameraToolsDestinationHolds:
+    """The cheap "already there?" test: name plus a kilobyte-granular size."""
+
+    def _entry(self, name="DSC_0001.NEF", number=1, size_kb=0):
+        return _CameraFile(number=number, name=name, size_kb=size_kb)
+
+    def test_missing_name_is_not_held(self, tmp_path):
+        assert CameraTools._destination_holds(tmp_path, self._entry()) is False
+
+    def test_matching_name_and_size_is_held(self, tmp_path):
+        (tmp_path / "DSC_0001.NEF").write_bytes(b"x" * 2048)
+        assert CameraTools._destination_holds(tmp_path, self._entry(size_kb=2)) is True
+
+    def test_same_name_very_different_size_is_not_held(self, tmp_path):
+        (tmp_path / "DSC_0001.NEF").write_bytes(b"x" * 2048)
+        assert CameraTools._destination_holds(tmp_path, self._entry(size_kb=9000)) is False
+
+    def test_a_previous_conflict_copy_counts_as_holding_it(self, tmp_path):
+        # The second body's photo lives under -2. Without this, that body
+        # would re-fetch its whole card on every resume and grow a -3.
+        (tmp_path / "DSC_0001.NEF").write_bytes(b"a" * 2048)
+        (tmp_path / "DSC_0001-2.NEF").write_bytes(b"b" * 4096)
+        assert CameraTools._destination_holds(tmp_path, self._entry(size_kb=4)) is True
+
+    def test_unknown_size_falls_back_to_the_name(self, tmp_path):
+        (tmp_path / "DSC_0001.NEF").write_bytes(b"x" * 2048)
+        assert CameraTools._destination_holds(tmp_path, self._entry(size_kb=None)) is True
+
+
+class TestCameraToolsPtpNeverLosesAPhoto:
+    """The gap this change closes: two bodies, one destination, PTP.
+
+    Two Nikons of the same model that report no serial number resolve to the
+    same identity, so they share a destination subdirectory. Their photos
+    share names *and* sizes. gphoto2's `--skip-existing` compared nothing but
+    the path, so the second body's DSC_0001.NEF was dropped inside gphoto2's
+    own process with no error and a destination that looked complete.
+    """
+
+    FOLDER = "/store_00010001/DCIM/100NCD80"
+    FOLDERS = [FOLDER]
+    TREE = {FOLDER: ["DSC_0001.NEF", "DSC_0002.NEF"]}
+    TAG = "Nikon_D850_store_00010001_DCIM_100NCD80"
+
+    def _body(self, marker):
+        return _FakeGphoto2(self.TREE, marker=marker)
+
+    def test_second_body_with_the_same_names_and_sizes_keeps_both_photos(self, tmp_path):
+        first = self._body("A")
+        saved, skipped, errors = _run_ptp_import(first, tmp_path, self.FOLDERS)
+        assert (saved, skipped) == (2, 0)
+
+        second = self._body("B")
+        saved, skipped, errors = _run_ptp_import(second, tmp_path, self.FOLDERS)
+
+        assert saved == 2, "the second body's photos must not be skipped"
+        assert skipped == 0
+        landed = sorted(p.name for p in (tmp_path / self.TAG).iterdir())
+        assert landed == [
+            "DSC_0001-2.NEF",
+            "DSC_0001.NEF",
+            "DSC_0002-2.NEF",
+            "DSC_0002.NEF",
+        ]
+        bodies = {p.read_text() for p in (tmp_path / self.TAG).iterdir()}
+        assert len(bodies) == 4, "four genuinely different photos are on disk"
+        renames = [e for e in errors if e.startswith(CameraTools.RENAMED_PREFIX)]
+        assert len(renames) == 2, "the user is told which files were renamed"
+        assert not [e for e in errors if e.startswith(CameraTools.SHORTFALL_PREFIX)]
+
+    def test_the_second_body_resumes_cheaply_and_does_not_grow_a_third_copy(self, tmp_path):
+        _run_ptp_import(self._body("A"), tmp_path, self.FOLDERS)
+        _run_ptp_import(self._body("B"), tmp_path, self.FOLDERS)
+
+        again = self._body("B")
+        saved, skipped, errors = _run_ptp_import(again, tmp_path, self.FOLDERS)
+
+        assert saved == 0
+        assert skipped == 2
+        assert len(list((tmp_path / self.TAG).iterdir())) == 4, "no -3 copies"
+        # Cheap: only the identity sample came down the wire, not the folder.
+        assert sorted(again.fetched) == ["DSC_0001.NEF", "DSC_0002.NEF"]
+
+    def test_the_first_body_still_resumes_without_being_confused_by_the_second(self, tmp_path):
+        _run_ptp_import(self._body("A"), tmp_path, self.FOLDERS)
+        _run_ptp_import(self._body("B"), tmp_path, self.FOLDERS)
+
+        again = self._body("A")
+        saved, skipped, _errors = _run_ptp_import(again, tmp_path, self.FOLDERS)
+        assert (saved, skipped) == (0, 2)
+        assert len(list((tmp_path / self.TAG).iterdir())) == 4
+
+    def test_the_conflict_is_reported_in_the_import_summary(self, tmp_path):
+        _run_ptp_import(self._body("A"), tmp_path, self.FOLDERS)
+        second = self._body("B")
+        with patch.object(
+            CameraTools,
+            "_detect_cameras",
+            return_value=[{"model": "Nikon D850", "port": "usb:002,002"}],
+        ):
+            patches = [
+                patch.object(CameraTools, "_list_image_folders", return_value=self.FOLDERS),
+                patch.object(CameraTools, "_count_files_in_folder", return_value=None),
+                patch.object(CameraTools, "_list_files_in_folder", _REAL_LIST_FILES),
+                patch("darktable_mcp.tools.camera_tools.subprocess.run", side_effect=second.run),
+                patch("darktable_mcp.tools.camera_tools.subprocess.Popen", side_effect=second),
+            ]
+            with ExitStack() as stack:
+                for item in patches:
+                    stack.enter_context(item)
+                summary = CameraTools().import_from_camera({"destination": str(tmp_path)})
+        assert "Kept both copies for 2 name conflict(s)" in summary
+        assert "DSC_0001-2.NEF" in summary
+
+
+class TestCameraToolsPtpResumeStaysCheap:
+    """Requirement two: an ordinary re-run must not re-read the card."""
+
+    FOLDER = "/store_00010001/DCIM/100NCD80"
+    FOLDERS = [FOLDER]
+    TREE = {FOLDER: [f"DSC_{n:04d}.NEF" for n in range(1, 6)]}
+    TAG_NO_SERIAL = "Nikon_D850_store_00010001_DCIM_100NCD80"
+    TAG_SERIAL = "Nikon_D850_sn_30014567_store_00010001_DCIM_100NCD80"
+
+    def test_a_body_with_a_serial_number_transfers_nothing_on_a_re_run(self, tmp_path):
+        first = _FakeGphoto2(self.TREE, marker="A")
+        _run_ptp_import(first, tmp_path, self.FOLDERS, serial="30014567")
+        before = sorted(p.name for p in (tmp_path / self.TAG_SERIAL).iterdir())
+
+        again = _FakeGphoto2(self.TREE, marker="A")
+        saved, skipped, errors = _run_ptp_import(again, tmp_path, self.FOLDERS, serial="30014567")
+
+        assert (saved, skipped) == (0, 5)
+        assert errors == []
+        assert again.fetched == [], "a serial number makes the directory provably this body's"
+        assert _transfer_calls(again) == [], "gphoto2 was not even asked to transfer"
+        assert sorted(p.name for p in (tmp_path / self.TAG_SERIAL).iterdir()) == before
+
+    def test_a_body_without_a_serial_pays_only_the_bounded_sample(self, tmp_path):
+        _run_ptp_import(_FakeGphoto2(self.TREE, marker="A"), tmp_path, self.FOLDERS)
+
+        again = _FakeGphoto2(self.TREE, marker="A")
+        saved, skipped, errors = _run_ptp_import(again, tmp_path, self.FOLDERS)
+
+        assert (saved, skipped) == (0, 5)
+        assert errors == []
+        assert len(again.fetched) == CameraTools.PROBE_SAMPLE_SIZE
+        assert len(list((tmp_path / self.TAG_NO_SERIAL).iterdir())) == 5
+
+    def test_resume_produces_the_same_paths_twice(self, tmp_path):
+        _run_ptp_import(_FakeGphoto2(self.TREE, marker="A"), tmp_path, self.FOLDERS)
+        first = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*.NEF"))
+        _run_ptp_import(_FakeGphoto2(self.TREE, marker="A"), tmp_path, self.FOLDERS)
+        second = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*.NEF"))
+        assert first == second
+        assert not (tmp_path / CameraTools.STAGING_DIR_NAME).exists()
+
+    def test_only_the_new_photos_are_fetched_after_more_shooting(self, tmp_path):
+        _run_ptp_import(
+            _FakeGphoto2(self.TREE, marker="A"), tmp_path, self.FOLDERS, serial="30014567"
+        )
+
+        grown = dict(self.TREE)
+        grown[self.FOLDER] = self.TREE[self.FOLDER] + ["DSC_0006.NEF", "DSC_0007.NEF"]
+        again = _FakeGphoto2(grown, marker="A")
+        saved, skipped, _errors = _run_ptp_import(again, tmp_path, self.FOLDERS, serial="30014567")
+
+        assert (saved, skipped) == (2, 5)
+        assert again.fetched == ["DSC_0006.NEF", "DSC_0007.NEF"]
+        # Fetched by number, as a range, rather than pulling the folder.
+        transfer = _transfer_calls(again)[0]
+        assert "--get-file" in transfer
+        assert transfer[transfer.index("--get-file") + 1] == "6-7"
+
+
+class TestCameraToolsPtpTellsTheUserWhatDidNotArrive:
+    """Requirement one: no photo goes missing without the user hearing it."""
+
+    FOLDER = "/store_00010001/DCIM/100NCD80"
+    FOLDERS = [FOLDER]
+    TREE = {FOLDER: ["DSC_0001.NEF", "DSC_0002.NEF", "DSC_0003.NEF"]}
+
+    def test_a_file_the_camera_refuses_to_send_is_named_in_the_errors(self, tmp_path):
+        fake = _FakeGphoto2(self.TREE, marker="A", refuse=["DSC_0002.NEF"])
+        saved, _skipped, errors = _run_ptp_import(fake, tmp_path, self.FOLDERS)
+
+        assert saved == 2
+        shortfalls = [e for e in errors if e.startswith(CameraTools.SHORTFALL_PREFIX)]
+        assert shortfalls, "a file that never arrived must be reported"
+        assert "DSC_0002.NEF" in shortfalls[0]
+
+    def test_a_clean_import_reports_no_shortfall(self, tmp_path):
+        fake = _FakeGphoto2(self.TREE, marker="A")
+        _saved, _skipped, errors = _run_ptp_import(fake, tmp_path, self.FOLDERS)
+        assert errors == []
+
+    def test_files_that_cannot_be_placed_are_kept_and_reported(self, tmp_path):
+        # The failure mode the staging design introduces: a download that
+        # succeeds but cannot be moved into place. The file must not be
+        # thrown away with the staging directory.
+        fake = _FakeGphoto2(self.TREE, marker="A")
+        with patch.object(
+            CameraTools, "_never_overwrite_target", side_effect=OSError("read-only file system")
+        ):
+            saved, _skipped, errors = _run_ptp_import(fake, tmp_path, self.FOLDERS)
+
+        assert saved == 0
+        shortfalls = [e for e in errors if e.startswith(CameraTools.SHORTFALL_PREFIX)]
+        assert any("could not be moved" in e for e in shortfalls)
+        staged = sorted(p.name for p in (tmp_path / CameraTools.STAGING_DIR_NAME).rglob("*.NEF"))
+        assert staged == ["DSC_0001.NEF", "DSC_0002.NEF", "DSC_0003.NEF"]
+
+    def test_an_unreadable_sample_forces_a_full_fetch_instead_of_a_skip(self, tmp_path):
+        # If the camera cannot re-send the sample, nothing has been proven,
+        # so nothing may be skipped: fetch everything and let placement
+        # decide by content.
+        _run_ptp_import(_FakeGphoto2(self.TREE, marker="A"), tmp_path, self.FOLDERS)
+
+        again = _FakeGphoto2(self.TREE, marker="A", refuse=self.TREE[self.FOLDER])
+        saved, skipped, _errors = _run_ptp_import(again, tmp_path, self.FOLDERS)
+        assert saved == 0
+        assert skipped == 0, "nothing was proven, so nothing was counted as skipped"
+        assert _transfer_calls(again), "the folder was re-requested rather than trusted"
+
+
+class TestCameraToolsPtpSampleIsBounded:
+    """The hole that is left, pinned so it cannot be quietly forgotten."""
+
+    FOLDER = "/store_00010001/DCIM/100NCD80"
+    FOLDERS = [FOLDER]
+    NAMES = [f"DSC_{n:04d}.NEF" for n in range(1, 9)]
+    TREE = {FOLDER: NAMES}
+    TAG = "Nikon_D850_store_00010001_DCIM_100NCD80"
+
+    class _PartlyIdenticalBody(_FakeGphoto2):
+        """A second body whose sampled photos happen to be byte-identical."""
+
+        DIFFERENT = "DSC_0004.NEF"
+
+        def _body(self, folder, name):
+            marker = self.marker if name == self.DIFFERENT else ""
+            return f"{marker}{folder}/{name}".ljust(self._size(name))[: self._size(name)]
+
+    def test_a_difference_outside_the_sample_is_not_detected(self, tmp_path):
+        _run_ptp_import(self._PartlyIdenticalBody(self.TREE, marker=""), tmp_path, self.FOLDERS)
+        second = self._PartlyIdenticalBody(self.TREE, marker="B")
+        saved, skipped, _errors = _run_ptp_import(second, tmp_path, self.FOLDERS)
+
+        # Documented in the CameraTools docstring: the sample is bounded, so
+        # a second body that matches on every sampled file is taken to be
+        # the same body and its differing photo is skipped. Closing this
+        # would mean downloading every file on every run.
+        assert (saved, skipped) == (0, 8)
+        assert len(list((tmp_path / self.TAG).iterdir())) == 8
+        assert len(second.fetched) == CameraTools.PROBE_SAMPLE_SIZE
+
+    def test_a_folder_no_bigger_than_the_sample_is_checked_exhaustively(self, tmp_path):
+        small = {self.FOLDER: self.NAMES[: CameraTools.PROBE_SAMPLE_SIZE]}
+        _run_ptp_import(_FakeGphoto2(small, marker="A"), tmp_path, self.FOLDERS)
+        second = _FakeGphoto2(small, marker="B")
+        saved, _skipped, _errors = _run_ptp_import(second, tmp_path, self.FOLDERS)
+        assert saved == CameraTools.PROBE_SAMPLE_SIZE
+        assert len(list((tmp_path / self.TAG).iterdir())) == 2 * CameraTools.PROBE_SAMPLE_SIZE
+
+
+class TestCameraToolsStagingHousekeeping:
+    """Staging is inside the destination, so it must never be counted or left."""
+
+    def test_staged_files_are_not_counted_as_imported(self, tmp_path):
+        (tmp_path / "Nikon_D850_a").mkdir()
+        (tmp_path / "Nikon_D850_a" / "DSC_0001.NEF").write_bytes(b"x")
+        staged = tmp_path / CameraTools.STAGING_DIR_NAME / "123-abc" / "Nikon_D850_a"
+        staged.mkdir(parents=True)
+        (staged / "DSC_0002.NEF").write_bytes(b"y")
+        assert CameraTools()._count_files_on_disk(tmp_path) == 1
+
+    def test_a_finished_folder_leaves_no_staging_directory(self, tmp_path):
+        folder = "/store_00010001/DCIM/100NCD80"
+        fake = _FakeGphoto2({folder: ["DSC_0001.NEF"]}, marker="A")
+        _run_ptp_import(fake, tmp_path, [folder])
+        assert not (tmp_path / CameraTools.STAGING_DIR_NAME).exists()
+
+    def test_a_timeout_places_what_arrived_and_drops_the_truncated_file(self, tmp_path):
+        # gphoto2 announces a file before writing it, so the last announced
+        # file is the one that was in flight when the clock ran out. Placing
+        # it would put a truncated photo in the destination under the real
+        # name, where the next run would find it and keep it forever.
+        folder = "/store_00010001/DCIM/100NCD80"
+        tag = "Nikon_D850_store_00010001_DCIM_100NCD80"
+
+        def _side_effect(cmd, **kwargs):
+            pattern = cmd[cmd.index("--filename") + 1]
+            base = Path(pattern.replace("%f.%C", ""))
+            base.mkdir(parents=True, exist_ok=True)
+            lines = []
+            for name, content in (
+                ("DSC_0001.NEF", "complete-1".ljust(64)),
+                ("DSC_0002.NEF", "complete-2".ljust(64)),
+                ("DSC_0003.NEF", "trunc"),
+            ):
+                (base / name).write_text(content)
+                lines.append(f"Saving file as {base / name}\n")
+            return _popen_mock(stdout="".join(lines), raises_timeout=True)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            with patch(
+                "darktable_mcp.tools.camera_tools.subprocess.Popen", side_effect=_side_effect
+            ):
+                CameraTools()._download_one_folder(
+                    "Nikon D850", "usb:002,002", folder, tmp_path, timeout_seconds=1
+                )
+
+        assert sorted(p.name for p in (tmp_path / tag).iterdir()) == [
+            "DSC_0001.NEF",
+            "DSC_0002.NEF",
+        ]
+        assert not (tmp_path / CameraTools.STAGING_DIR_NAME).exists()

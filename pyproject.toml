@@ -28,11 +28,14 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    # Upper bound is deliberate: mcp 2.0.0 removed the @server.list_tools() /
-    # @server.call_tool() decorators from mcp.server.Server, so this server dies at
-    # startup with AttributeError under 2.x. Porting to the mcp 2.x MCPServer API is a
-    # separate follow-up; do not lift the bound before that lands.
-    "mcp>=1.9,<2",
+    # Floor is 2.0: darktable_mcp/server.py registers its tools through the mcp 2.x
+    # low-level Server(on_list_tools=..., on_call_tool=...) constructor handlers, which
+    # replaced the 1.x @server.list_tools() / @server.call_tool() decorators. Neither
+    # spelling exists in the other major, so 1.x cannot run this code.
+    # Upper bound guards the next major the same way: 2.0 already moved the wire types
+    # to mcp_types (Tool.inputSchema -> Tool.input_schema) and made handlers return
+    # ListToolsResult / CallToolResult instead of bare lists.
+    "mcp>=2,<3",
 ]
 
 [project.optional-dependencies]

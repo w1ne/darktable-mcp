@@ -7,7 +7,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 #: How long to sleep between polls of the response file. Small enough that a
 #: fast plugin round-trip still feels instant, large enough not to spin a core.
@@ -30,7 +30,7 @@ DEFAULT_TIMEOUTS = {
 }
 
 
-def resolve_timeout(method: str, timeout: Optional[float] = None) -> float:
+def resolve_timeout(method: str, timeout: float | None = None) -> float:
     """Resolve the wait budget for one bridge call.
 
     Args:
@@ -86,7 +86,7 @@ class Bridge:
         self,
         method: str,
         params: dict[str, Any],
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> Any:
         """Send one request to the plugin and wait for its response.
 
@@ -109,8 +109,7 @@ class Bridge:
 
         if not self._plugin_path.is_file():
             raise BridgePluginNotInstalledError(
-                f"plugin not installed at {self._plugin_path}. "
-                "Run: darktable-mcp install-plugin"
+                f"plugin not installed at {self._plugin_path}. " "Run: darktable-mcp install-plugin"
             )
 
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -147,9 +146,7 @@ class Bridge:
                         resp_path.unlink(missing_ok=True)
 
                     if not isinstance(response, dict) or "id" not in response:
-                        raise BridgeProtocolError(
-                            f"response missing id field: {response!r}"
-                        )
+                        raise BridgeProtocolError(f"response missing id field: {response!r}")
                     if "error" in response:
                         raise BridgeError(str(response["error"]))
                     if "result" not in response:
@@ -160,8 +157,7 @@ class Bridge:
                 time.sleep(POLL_INTERVAL_SECONDS)
 
             raise BridgeTimeoutError(
-                f"method {method!r} got no plugin response within its "
-                f"{timeout:g}s timeout"
+                f"method {method!r} got no plugin response within its " f"{timeout:g}s timeout"
             )
         finally:
             # Best-effort cleanup of our own request file.

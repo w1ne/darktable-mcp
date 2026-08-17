@@ -78,17 +78,14 @@ def test_install_overwrites_modified_plugin_file(tmp_path):
 def test_install_re_enables_commented_out_require(tmp_path):
     luarc_dir = tmp_path / ".config" / "darktable"
     luarc_dir.mkdir(parents=True)
-    (luarc_dir / "luarc").write_text(
-        '-- some other comment\n-- require "darktable_mcp"\n'
-    )
+    (luarc_dir / "luarc").write_text('-- some other comment\n-- require "darktable_mcp"\n')
     install(tmp_path)
     text = (luarc_dir / "luarc").read_text()
     # The commented-out form is still there (we don't touch it),
     # but a fresh active require line was appended.
     assert '-- require "darktable_mcp"' in text
     active_lines = [
-        ln for ln in text.splitlines()
-        if ln.split("--", 1)[0].rstrip() == 'require "darktable_mcp"'
+        ln for ln in text.splitlines() if ln.split("--", 1)[0].rstrip() == 'require "darktable_mcp"'
     ]
     assert len(active_lines) == 1
 
@@ -104,4 +101,4 @@ def test_uninstall_removes_require_with_inline_comment(tmp_path):
     uninstall(tmp_path)
     text = (luarc_dir / "luarc").read_text()
     assert 'require "other"' in text
-    assert 'darktable_mcp' not in text
+    assert "darktable_mcp" not in text

@@ -4,12 +4,20 @@ import asyncio
 import functools
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
-from mcp.server import Server
+from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    TextContent,
+    Tool,
+)
 
 from .bridge.client import (
     Bridge,
@@ -32,19 +40,30 @@ from .utils.errors import DarktableMCPError
 
 logger = logging.getLogger(__name__)
 
-ToolHandler = Callable[[Dict[str, Any]], Awaitable[List[TextContent]]]
+ToolHandler = Callable[[dict[str, Any]], Awaitable[list[TextContent]]]
 
 
 class DarktableMCPServer:
     """MCP server for darktable photo management and editing."""
 
     def __init__(self) -> None:
-        self.app: Server = Server("darktable-mcp")
-        self._cli: Optional[CLIWrapper] = None
+        # mcp 2.x removed the @server.list_tools() / @server.call_tool()
+        # decorators; the low-level Server now takes the same two handlers as
+        # constructor kwargs, dispatched by method string. The handcrafted
+        # `Tool` list below is why this stays on the low-level surface rather
+        # than moving to MCPServer: MCPServer derives each inputSchema from the
+        # handler's signature, which injects pydantic `title` keys and cannot
+        # express the `ratings` map's per-value `minimum`/`maximum`, so the
+        # agent-facing contract would drift.
+        self.app: Server[Any] = Server(
+            "darktable-mcp",
+            on_list_tools=self._on_list_tools,
+            on_call_tool=self._on_call_tool,
+        )
+        self._cli: CLIWrapper | None = None
         self.camera_tools = CameraTools()
         self.bridge = Bridge()
-        self._handler_map: Dict[str, ToolHandler] = self._build_handlers()
-        self._setup_tools()
+        self._handler_map: dict[str, ToolHandler] = self._build_handlers()
 
     @property
     def cli(self) -> CLIWrapper:
@@ -53,26 +72,45 @@ class DarktableMCPServer:
             self._cli = CLIWrapper()
         return self._cli
 
-    def _setup_tools(self) -> None:
-        @self.app.list_tools()
-        async def list_tools() -> List[Tool]:
-            return self._tool_definitions()
+    async def _on_list_tools(
+        self,
+        ctx: ServerRequestContext[Any],
+        params: PaginatedRequestParams | None,
+    ) -> ListToolsResult:
+        """Serve `tools/list`. The whole catalogue fits one page, so no cursor."""
+        return ListToolsResult(tools=self._tool_definitions())
 
-        @self.app.call_tool()
-        async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
-            handler = self._handler_map.get(name)
-            if handler is None:
-                return [TextContent(type="text", text=f"Unknown tool: {name}")]
-            try:
-                return await handler(arguments)
-            except DarktableMCPError as e:
-                logger.error("Tool %s failed: %s", name, e)
-                return [TextContent(type="text", text=f"Error: {e}")]
-            except Exception as e:
-                logger.exception("Tool %s crashed", name)
-                return [TextContent(type="text", text=f"Tool {name} crashed: {e}")]
+    async def _on_call_tool(
+        self,
+        ctx: ServerRequestContext[Any],
+        params: CallToolRequestParams,
+    ) -> CallToolResult:
+        """Serve `tools/call`.
 
-    def _tool_definitions(self) -> List[Tool]:
+        Every outcome — unknown tool, DarktableMCPError, unexpected crash —
+        comes back as ordinary text content with the default ``isError=False``,
+        exactly as the 1.x decorator produced. open_in_darktable depends on
+        this: a raised DarktableMCPError must reach the agent as tool output it
+        can read and act on, not as a JSON-RPC transport error.
+        """
+        return CallToolResult(
+            content=list(await self._call_tool(params.name, params.arguments or {}))
+        )
+
+    async def _call_tool(self, name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        handler = self._handler_map.get(name)
+        if handler is None:
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        try:
+            return await handler(arguments)
+        except DarktableMCPError as e:
+            logger.error("Tool %s failed: %s", name, e)
+            return [TextContent(type="text", text=f"Error: {e}")]
+        except Exception as e:
+            logger.exception("Tool %s crashed", name)
+            return [TextContent(type="text", text=f"Tool {name} crashed: {e}")]
+
+    def _tool_definitions(self) -> list[Tool]:
         return [
             Tool(
                 name="view_photos",
@@ -84,7 +122,7 @@ class DarktableMCPServer:
                     "Requires darktable to be running with the darktable-mcp "
                     "Lua plugin installed (see darktable-mcp install-plugin)."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "filter": {
@@ -114,7 +152,7 @@ class DarktableMCPServer:
                     "darktable library. Requires darktable to be running with "
                     "the darktable-mcp Lua plugin installed."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "photo_ids": {
@@ -142,7 +180,7 @@ class DarktableMCPServer:
                     "darktable to be running with the darktable-mcp Lua plugin "
                     "installed."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "source_path": {
@@ -167,7 +205,7 @@ class DarktableMCPServer:
                     "must match exactly. Requires darktable to be running with the "
                     "darktable-mcp Lua plugin installed."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {},
                 },
@@ -181,7 +219,7 @@ class DarktableMCPServer:
                     "darktable to be running with the darktable-mcp Lua plugin "
                     "installed."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "photo_ids": {
@@ -215,9 +253,15 @@ class DarktableMCPServer:
                     "same destination. Import the destination recursively. "
                     "A file that would collide with a different photo already "
                     "on disk is kept alongside it as <name>-2.<ext>, never "
-                    "overwritten. Two bodies of the SAME model that report no "
-                    "serial number cannot be told apart — give those separate "
-                    "destinations. "
+                    "overwritten. This holds for two bodies of the same model "
+                    "that report no serial number and therefore share a "
+                    "subdirectory: before skipping files a destination appears "
+                    "to already hold, such a camera is asked for a small "
+                    "sample of them and the bytes are compared, so a second "
+                    "body's photos are kept rather than dropped. Re-running is "
+                    "cheap: a body with a serial number transfers nothing it "
+                    "already delivered. Any file the card lists that does not "
+                    "reach the destination is reported by name. "
                     "Cost: this tool runs to completion synchronously and does "
                     "not return early. A full card can take many minutes, up to "
                     "the 1 hour default timeout, which is longer than most MCP "
@@ -225,7 +269,7 @@ class DarktableMCPServer:
                     "while it runs by tailing the .import.log file in the "
                     "destination directory."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "destination": {
@@ -273,7 +317,7 @@ class DarktableMCPServer:
                     "path from each item rather than assuming "
                     "<output_dir>/<stem>.jpg."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "source_dir": {
@@ -283,8 +327,7 @@ class DarktableMCPServer:
                         "output_dir": {
                             "type": "string",
                             "description": (
-                                "Where to write JPEGs. "
-                                "Default: <source_dir>/.previews/"
+                                "Where to write JPEGs. " "Default: <source_dir>/.previews/"
                             ),
                         },
                         "max_dim": {
@@ -335,7 +378,7 @@ class DarktableMCPServer:
                     "A sidecar with no recognisable rating is skipped with an "
                     "error rather than overwritten."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "source_dir": {
@@ -390,7 +433,7 @@ class DarktableMCPServer:
                     "`rating_max=N` (<=), arbitrary `rating_min..rating_max` "
                     "inner ranges, or no filter at all."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "source_dir": {
@@ -402,8 +445,7 @@ class DarktableMCPServer:
                             "minimum": -1,
                             "maximum": 5,
                             "description": (
-                                "Filter to exactly this rating "
-                                "(-1=reject, 0=unrated, 1-5=stars)"
+                                "Filter to exactly this rating " "(-1=reject, 0=unrated, 1-5=stars)"
                             ),
                         },
                         "rating_min": {
@@ -439,7 +481,7 @@ class DarktableMCPServer:
                     "written file is <stem>.<format>. Read the real path from "
                     "the `output` field of the .export_images.jsonl side file."
                 ),
-                inputSchema={
+                input_schema={
                     "type": "object",
                     "properties": {
                         "photo_ids": {
@@ -479,7 +521,7 @@ class DarktableMCPServer:
             ),
         ]
 
-    def _build_handlers(self) -> Dict[str, ToolHandler]:
+    def _build_handlers(self) -> dict[str, ToolHandler]:
         return {
             "import_from_camera": self._handle_import_from_camera,
             "export_images": self._handle_export_images,
@@ -493,13 +535,13 @@ class DarktableMCPServer:
             "apply_preset": self._handle_apply_preset,
         }
 
-    def list_tools(self) -> List[str]:
+    def list_tools(self) -> list[str]:
         """Tool names registered with the server (used by tests/introspection)."""
         return list(self._handler_map.keys())
 
     async def _bridge_call(
-        self, method: str, arguments: Dict[str, Any]
-    ) -> Tuple[Optional[Any], Optional[List[TextContent]]]:
+        self, method: str, arguments: dict[str, Any]
+    ) -> tuple[Any | None, list[TextContent] | None]:
         """Run one bridge call off the event loop and map its errors to text.
 
         This is the single home of the bridge error-to-message mapping; the
@@ -517,27 +559,31 @@ class DarktableMCPServer:
         try:
             result = await asyncio.to_thread(self.bridge.call, method, arguments)
         except BridgePluginNotInstalledError:
-            return None, [TextContent(
-                type="text",
-                text="darktable-mcp plugin not installed. Run: darktable-mcp install-plugin",
-            )]
+            return None, [
+                TextContent(
+                    type="text",
+                    text="darktable-mcp plugin not installed. Run: darktable-mcp install-plugin",
+                )
+            ]
         except BridgeTimeoutError:
             seconds = resolve_timeout(method)
-            return None, [TextContent(
-                type="text",
-                text=(
-                    f"{method} exceeded its {seconds:g}s bridge timeout. Either "
-                    "darktable is not running with the darktable-mcp Lua plugin "
-                    "loaded (open darktable and try again), or the library is "
-                    f"large enough that this call needs longer than {seconds:g}s "
-                    "to finish."
-                ),
-            )]
+            return None, [
+                TextContent(
+                    type="text",
+                    text=(
+                        f"{method} exceeded its {seconds:g}s bridge timeout. Either "
+                        "darktable is not running with the darktable-mcp Lua plugin "
+                        "loaded (open darktable and try again), or the library is "
+                        f"large enough that this call needs longer than {seconds:g}s "
+                        "to finish."
+                    ),
+                )
+            ]
         except BridgeError as e:
             return None, [TextContent(type="text", text=f"Plugin error: {e}")]
         return result, None
 
-    async def _handle_import_from_camera(self, arguments: Dict[str, Any]) -> List[TextContent]:
+    async def _handle_import_from_camera(self, arguments: dict[str, Any]) -> list[TextContent]:
         try:
             # Card transfers run for minutes to an hour; off the loop so the
             # stdio connection keeps serving other requests meanwhile.
@@ -547,7 +593,7 @@ class DarktableMCPServer:
             logger.error("import_from_camera failed: %s", e)
             return [TextContent(type="text", text=f"Error: {e}")]
 
-    async def _handle_export_images(self, arguments: Dict[str, Any]) -> List[TextContent]:
+    async def _handle_export_images(self, arguments: dict[str, Any]) -> list[TextContent]:
         photo_ids = arguments.get("photo_ids") or []
         output_path = arguments.get("output_path")
         format_type = arguments.get("format", "jpeg")
@@ -571,7 +617,7 @@ class DarktableMCPServer:
         out_dir = Path(output_path)
         # darktable-cli runs one subprocess per file, so a batch is minutes of
         # blocking work. Offload it and keep the event loop responsive.
-        results: List[ExportResult] = await asyncio.to_thread(
+        results: list[ExportResult] = await asyncio.to_thread(
             functools.partial(
                 self.cli.batch_export,
                 input_files=input_files,
@@ -589,7 +635,7 @@ class DarktableMCPServer:
         side_file = out_dir / ".export_images.jsonl"
         out_dir.mkdir(parents=True, exist_ok=True)
         ok = fail = 0
-        first_error: Optional[str] = None
+        first_error: str | None = None
         with side_file.open("w") as fh:
             for r in results:
                 # `r.ok` is the authority. The old code sniffed the status
@@ -621,7 +667,7 @@ class DarktableMCPServer:
             summary.append(f"first error: {first_error}")
         return [TextContent(type="text", text="\n".join(summary))]
 
-    async def _handle_extract_previews(self, arguments: Dict[str, Any]) -> List[TextContent]:
+    async def _handle_extract_previews(self, arguments: dict[str, Any]) -> list[TextContent]:
         source_dir = arguments.get("source_dir")
         if not source_dir:
             return [TextContent(type="text", text="source_dir is required")]
@@ -643,7 +689,7 @@ class DarktableMCPServer:
         )
         return [TextContent(type="text", text=format_extract_summary(result))]
 
-    async def _handle_open_in_darktable(self, arguments: Dict[str, Any]) -> List[TextContent]:
+    async def _handle_open_in_darktable(self, arguments: dict[str, Any]) -> list[TextContent]:
         source_dir = arguments.get("source_dir")
         if not source_dir:
             return [TextContent(type="text", text="source_dir is required")]
@@ -659,7 +705,7 @@ class DarktableMCPServer:
         )
         return [TextContent(type="text", text=format_open_summary(result))]
 
-    async def _handle_view_photos(self, arguments: Dict[str, Any]) -> List[TextContent]:
+    async def _handle_view_photos(self, arguments: dict[str, Any]) -> list[TextContent]:
         photos, error = await self._bridge_call("view_photos", arguments)
         if error is not None:
             return error
@@ -677,18 +723,20 @@ class DarktableMCPServer:
             lines.append(f"ID: {p['id']} | {p['filename']} | Rating: {stars} | {path}")
         return [TextContent(type="text", text="\n".join(lines))]
 
-    async def _handle_rate_photos(self, arguments: Dict[str, Any]) -> List[TextContent]:
+    async def _handle_rate_photos(self, arguments: dict[str, Any]) -> list[TextContent]:
         result, error = await self._bridge_call("rate_photos", arguments)
         if error is not None:
             return error
 
         updated = result.get("updated", 0)
-        return [TextContent(
-            type="text",
-            text=f"Updated {updated} photos with {arguments.get('rating')} stars",
-        )]
+        return [
+            TextContent(
+                type="text",
+                text=f"Updated {updated} photos with {arguments.get('rating')} stars",
+            )
+        ]
 
-    async def _handle_import_batch(self, arguments: Dict[str, Any]) -> List[TextContent]:
+    async def _handle_import_batch(self, arguments: dict[str, Any]) -> list[TextContent]:
         result, error = await self._bridge_call("import_batch", arguments)
         if error is not None:
             return error
@@ -709,7 +757,7 @@ class DarktableMCPServer:
             lines.append(result["note"])
         return [TextContent(type="text", text="\n".join(lines))]
 
-    async def _handle_list_styles(self, arguments: Dict[str, Any]) -> List[TextContent]:
+    async def _handle_list_styles(self, arguments: dict[str, Any]) -> list[TextContent]:
         result, error = await self._bridge_call("list_styles", arguments)
         if error is not None:
             return error
@@ -730,7 +778,7 @@ class DarktableMCPServer:
             lines.append(f"  ... and {count - 50} more (full list available; this is the first 50)")
         return [TextContent(type="text", text="\n".join(lines))]
 
-    async def _handle_apply_preset(self, arguments: Dict[str, Any]) -> List[TextContent]:
+    async def _handle_apply_preset(self, arguments: dict[str, Any]) -> list[TextContent]:
         result, error = await self._bridge_call("apply_preset", arguments)
         if error is not None:
             return error
@@ -743,7 +791,7 @@ class DarktableMCPServer:
             parts.append(f"Missed (image not in library): {', '.join(missed)}")
         return [TextContent(type="text", text="\n".join(parts))]
 
-    async def _handle_apply_ratings_batch(self, arguments: Dict[str, Any]) -> List[TextContent]:
+    async def _handle_apply_ratings_batch(self, arguments: dict[str, Any]) -> list[TextContent]:
         source_dir = arguments.get("source_dir")
         ratings = arguments.get("ratings") or {}
         if not source_dir:

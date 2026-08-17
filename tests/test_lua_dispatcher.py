@@ -62,8 +62,7 @@ def test_lua_dispatcher():
         timeout=60,
     )
     assert result.returncode == 0, (
-        f"Lua tests failed under {LUA_BIN}.\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        f"Lua tests failed under {LUA_BIN}.\n" f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     # Guard against a suite that exits 0 without having asserted anything
     # (e.g. an early `return` or a load failure swallowed somewhere).
@@ -120,9 +119,7 @@ def test_plugin_has_no_flat_poll_loop():
     worker = source.split("local function worker_loop", 1)
     assert len(worker) == 2, "worker_loop not found in the plugin"
     body = worker[1]
-    assert "dt.control.sleep(100)" not in body, (
-        "worker_loop still contains a hardcoded 100ms sleep"
-    )
+    assert "dt.control.sleep(100)" not in body, "worker_loop still contains a hardcoded 100ms sleep"
 
 
 def test_import_batch_does_not_echo_an_unhonoured_recursive_flag():
@@ -144,8 +141,7 @@ def test_import_batch_does_not_echo_an_unhonoured_recursive_flag():
         "darktable preference"
     )
     assert "recursive_honoured" in body, (
-        "import_batch does not report whether the requested recursion mode "
-        "actually happened"
+        "import_batch does not report whether the requested recursion mode " "actually happened"
     )
     # The plugin must not silently rewrite a persistent user preference.
     assert "preferences.write" not in source, (
@@ -211,6 +207,4 @@ def test_sweep_covers_orphan_responses():
     assert len(sweep) == 2, "sweep_stale not found in the plugin"
     body = sweep[1].split("\nend", 1)[0]
     assert '-name "request-*.json"' in body, "sweep no longer covers requests"
-    assert '-name "response-*.json"' in body, (
-        "sweep_stale does not delete orphan response files"
-    )
+    assert '-name "response-*.json"' in body, "sweep_stale does not delete orphan response files"

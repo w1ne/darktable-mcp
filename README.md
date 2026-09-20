@@ -1,5 +1,44 @@
 # Darktable MCP Server
 
+## Recovered editing tools
+
+This release integrates Roman Fordinal's `agentic-mcp` fork while retaining
+upstream's MCP 2.x transport, verified exports, collision-free output names,
+and asynchronous library operations. The server now exposes 54 tools.
+
+- Contact sheets, tags, notes and collections help review a photo library.
+- Module parameters, masks, retouch shapes, viewport controls and LUT comparisons
+  support editing and previewing the current darkroom image.
+- SAM2 segmentation and MODNet matting remain optional sidecar services;
+  segmentation also supports the existing local GrabCut fallback.
+- Streamable HTTP is available with `darktable-mcp --http` (localhost by default).
+  Set `DTMCP_BEARER_TOKEN` for authentication and `DTMCP_PUBLIC_URL` to the external
+  server origin if generated-file download links are needed. File URLs contain
+  an access token, so treat them as private links.
+
+**Library operations work with the standard plugin. Live darkroom editing requires
+[the companion patched darktable](https://github.com/rfordinal/darktable-agentic/tree/agentic-mcp),
+which exposes `darktable.develop`.** The bridge reports this requirement when
+called on a stock build; installing this Python package does not patch darktable.
+
+Install the Python server from this repository with `pip install -e .`, then run
+`darktable-mcp install-plugin`. Keep `[vision]` for RAW preview/rating tools.
+Use `darktable-mcp install-sidecar --help` for optional model installation.
+The [fork's detailed tool guide](docs/agentic-fork.md) describes the editing tools;
+its original deployment examples are historical, not this project's install commands.
+
+`view_photos` continues to browse the whole library by default; request
+`scope="collection"` for the open lighttable collection. For duplicate image
+versions, pass the reported `sidecar` paths through `export_images.xmp_paths`.
+Contact sheets also use each image's selected sidecar. Export details report
+actual output paths: do not infer filenames from input basenames.
+
+GUI tool transactions are serialized so concurrent previews cannot overwrite
+another edit during restoration. Bridge calls and contact-sheet rendering run off the event
+loop, leaving the MCP connection responsive. Unit/transport tests exercise this
+integration; hardware camera and patched-darktable runtime validation are separate.
+
+
 A Model Context Protocol (MCP) server that exposes darktable operations
 to MCP clients (Claude Desktop, Claude Code, etc.). The AI lives in the
 client; this server drives darktable.

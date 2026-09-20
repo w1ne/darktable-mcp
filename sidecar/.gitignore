@@ -1,0 +1,4 @@
+# Model weights are large binaries fetched on demand -- never commit them.
+checkpoints/*.pt
+checkpoints/*.pth
+checkpoints/*.onnx

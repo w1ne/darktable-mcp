@@ -1,0 +1,48 @@
+# darktable-mcp segmentation sidecar (T2.1) -- pinned, CPU-only.
+#
+# Real SAM2 backend requires Python >= 3.10 (torch >= 2.5.1 dropped 3.8/3.9
+# wheels; this repo's system python3 is 3.8, so use a 3.10+ interpreter --
+# `uv venv --python 3.12 .venv` works well if you have `uv`).
+#
+# Install in TWO steps (do not merge into one `pip/uv install -r` command --
+# combining the CPU wheel index with the default PyPI index in a single
+# resolve makes both uv and pip's dependency resolver misbehave: they can
+# pick an unrelated, too-old `iopath` off the CPU index and then fail to
+# satisfy sam2's `iopath>=0.1.10` requirement). Verified working sequence:
+#
+#   uv venv --python 3.12 .venv
+#   uv pip install --python .venv/bin/python3.12 \
+#       --index-url https://download.pytorch.org/whl/cpu \
+#       -r requirements-torch.txt
+#   uv pip install --python .venv/bin/python3.12 -r requirements.txt
+#
+# (plain pip: same two `pip install` calls, first with
+#  `--index-url https://download.pytorch.org/whl/cpu`, from inside a 3.10+
+#  venv's `pip`.)
+#
+# If you only want the stub/geometry pipeline (no real segmentation model,
+# see README "Enabling real SAM2"), skip requirements-torch.txt entirely --
+# everything else here works without torch/sam2 installed.
+
+numpy>=1.24.4,<3
+pillow>=9.4.0
+opencv-python-headless>=4.7.0
+sam2==1.1.0
+pytest>=7.0.0
+
+# Grounded-SAM (2026-07-27): Grounding DINO gives SAM2 real text-prompt
+# grounding it has no native support for (see segment.py's `label` handling
+# -- SAM2 itself ignores it). `transformers` ships a pure-torch port
+# (IDEA-Research/grounding-dino-tiny, no custom CUDA ops, no `timm`
+# dependency needed for this port's Swin backbone) -- CPU inference works
+# the same way SAM2's does above. Weights (~172MB) auto-download to the HF
+# hub cache (~/.cache/huggingface) on first use, same "lazy, on first real
+# use" pattern as SAM2's checkpoint file, just via HF's own cache instead of
+# a checkpoints/ file this repo manages directly.
+transformers>=4.40
+
+# Matting sidecar (matte.py, T3.2). MODNet backend runs via onnxruntime
+# (CPU) -- no torch dependency for inference, unlike the sam2 backend above,
+# so this installs from the default index in this same single step (no
+# special CPU-wheel index needed the way requirements-torch.txt is for sam2).
+onnxruntime>=1.17.0

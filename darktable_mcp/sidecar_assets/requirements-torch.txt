@@ -1,0 +1,7 @@
+# Step 1 of the two-step install -- see requirements.txt for why this is
+# separate. Install with:
+#   uv pip install --python .venv/bin/python3.12 \
+#       --index-url https://download.pytorch.org/whl/cpu \
+#       -r requirements-torch.txt
+torch==2.5.1+cpu
+torchvision==0.20.1+cpu

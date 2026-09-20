@@ -1,0 +1,2326 @@
+[
+  {
+    "name": "view_photos",
+    "description": "Browse photos in the library by default, or the open lighttable view when scope is collection. Filter by filename substring, minimum star rating, or both. Returns id, filename, absolute file path, and rating per match \u2014 the path can be passed straight into export_images. Requires darktable to be running with the darktable-mcp Lua plugin installed (see darktable-mcp install-plugin).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "string",
+          "description": "Substring filter on filename (case-insensitive)"
+        },
+        "rating_min": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 5,
+          "description": "Minimum star rating to include"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 100,
+          "description": "Maximum number of photos to return"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "collection",
+            "library"
+          ],
+          "default": "library",
+          "description": "'collection': only photos in the currently open lighttable view. 'library' (default): the entire darktable library, ignoring any open collection/filter."
+        }
+      }
+    }
+  },
+  {
+    "name": "get_contact_sheet",
+    "description": "Build one grid image (a 'contact sheet') from photos in the currently open lighttable collection, so a batch can be visually culled without opening each photo in darkroom. Typical flow: request pages of 25 with filter='unrated', look at each sheet, note which image_ids/positions to rate or inspect further, then page through with next_offset until has_more is false. Read-only -- never changes ratings, tags, edit history, or the darkroom state. Requires darktable to be running with the darktable-mcp Lua plugin installed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Photos to skip, applied AFTER filter+sort"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "default": 25,
+          "description": "Max photos on this sheet (25 is the sweet spot for visual culling)"
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 8,
+          "default": 5,
+          "description": "Grid columns; rows = ceil(returned / columns)"
+        },
+        "filter": {
+          "type": "string",
+          "enum": [
+            "all",
+            "unrated",
+            "rated",
+            "rejected",
+            "selected"
+          ],
+          "default": "unrated",
+          "description": "'unrated': no stars, not rejected. 'rated': 1-5 stars. 'rejected': rating -1. 'selected': darktable's current lighttable selection. 'all': no filter."
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "filename",
+            "image_id",
+            "capture_time",
+            "rating"
+          ],
+          "default": "filename",
+          "description": "Sort key applied before offset/limit"
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "asc"
+        },
+        "include_filename": {
+          "type": "boolean",
+          "default": true
+        },
+        "include_image_id": {
+          "type": "boolean",
+          "default": true
+        },
+        "include_rating": {
+          "type": "boolean",
+          "default": true
+        },
+        "include_sequence_number": {
+          "type": "boolean",
+          "default": true
+        },
+        "thumbnail_width": {
+          "type": "integer",
+          "minimum": 200,
+          "maximum": 500,
+          "default": 320,
+          "description": "Per-photo thumbnail width in px; height follows aspect ratio"
+        },
+        "background": {
+          "type": "string",
+          "enum": [
+            "dark",
+            "light"
+          ],
+          "default": "dark"
+        }
+      }
+    }
+  },
+  {
+    "name": "rate_photos",
+    "description": "Apply a star rating to one or more photos in the user's darktable library. Requires darktable to be running with the darktable-mcp Lua plugin installed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "photo_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of photo IDs (from view_photos)"
+        },
+        "rating": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 5,
+          "description": "Star rating: -1=reject, 0=unrated, 1-5=stars"
+        }
+      },
+      "required": [
+        "photo_ids",
+        "rating"
+      ]
+    }
+  },
+  {
+    "name": "tag_photo",
+    "description": "Attach and/or detach keyword tags on one or more photos in the user's darktable library. Tags not already present are created automatically. Requires darktable to be running with the darktable-mcp Lua plugin installed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "photo_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of photo IDs (from view_photos)"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tag names to attach (created if missing)"
+        },
+        "remove_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tag names to detach"
+        }
+      },
+      "required": [
+        "photo_ids"
+      ]
+    }
+  },
+  {
+    "name": "set_photo_note",
+    "description": "Write a description or editorial note for a photo, stored in the photo's Description metadata field (Xmp.dc.description in the xmp sidecar). Overwrites any existing description on that photo. Requires darktable to be running with the darktable-mcp Lua plugin installed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "photo_id": {
+          "type": "string",
+          "description": "Photo ID (from view_photos)"
+        },
+        "note": {
+          "type": "string",
+          "description": "Assessment/note text to store as the photo's description"
+        }
+      },
+      "required": [
+        "photo_id",
+        "note"
+      ]
+    }
+  },
+  {
+    "name": "get_photo_note",
+    "description": "Read back the Description metadata field (Xmp.dc.description) for a photo, e.g. a previously written AI assessment/note. Requires darktable to be running with the darktable-mcp Lua plugin installed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "photo_id": {
+          "type": "string",
+          "description": "Photo ID (from view_photos)"
+        }
+      },
+      "required": [
+        "photo_id"
+      ]
+    }
+  },
+  {
+    "name": "list_collections",
+    "description": "List the user's darktable tags, the closest equivalent to Lightroom-style collections since darktable's Lua API has no separate collection object. Returns tag name and photo count per tag. Requires darktable to be running with the darktable-mcp Lua plugin installed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "string",
+          "description": "Substring filter on tag name (case-insensitive)"
+        }
+      }
+    }
+  },
+  {
+    "name": "list_photos_in_collection",
+    "description": "List photos carrying a given darktable tag (see list_collections). Returns id, filename, absolute file path, and rating per photo. Requires darktable to be running with the darktable-mcp Lua plugin installed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "collection": {
+          "type": "string",
+          "description": "Tag/collection name (from list_collections)"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5000,
+          "default": 1000,
+          "description": "Maximum number of photos to return"
+        }
+      },
+      "required": [
+        "collection"
+      ]
+    }
+  },
+  {
+    "name": "import_batch",
+    "description": "Register a folder as a film roll in the user's darktable library. Useful when you've copied photos from a card or external drive and want darktable to know about them. Returns the count of newly-imported photos. Requires darktable to be running with the darktable-mcp Lua plugin installed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source_path": {
+          "type": "string",
+          "description": "Absolute path to the folder of photos to import"
+        },
+        "recursive": {
+          "type": "boolean",
+          "default": true,
+          "description": "Recurse into subdirectories (default true)"
+        }
+      },
+      "required": [
+        "source_path"
+      ]
+    }
+  },
+  {
+    "name": "list_styles",
+    "description": "List all darktable styles (presets) installed on the user's system. Returns name and description for each. Required discovery step before calling apply_preset, since style names must match exactly. Requires darktable to be running with the darktable-mcp Lua plugin installed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "apply_preset",
+    "description": "Apply a darktable style (preset) to one or more photos. The preset_name must exactly match a style name from list_styles. Returns counts of applied and missed photos. Requires darktable to be running with the darktable-mcp Lua plugin installed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "photo_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Photo IDs (from view_photos)"
+        },
+        "preset_name": {
+          "type": "string",
+          "description": "Style name (must match exactly; see list_styles)"
+        }
+      },
+      "required": [
+        "photo_ids",
+        "preset_name"
+      ]
+    }
+  },
+  {
+    "name": "import_from_camera",
+    "description": "Use when a camera or memory card is physically connected. Detects the camera via libgphoto2 and copies all photos to a local directory, then returns the destination path. Copying alone does not put the photos in the library: follow up with import_batch on that destination path to register them as a film roll. Files are written one subdirectory per camera folder or card, prefixed with the camera's identity (e.g. <destination>/Nikon_D850_sn_30014567_store_00010001_DCIM_100NCD80/DSC_0001.NEF), because camera filenames repeat across folders, across the two cards of a dual-slot body, and across bodies importing into the same destination. Import the destination recursively. A file that would collide with a different photo already on disk is kept alongside it as <name>-2.<ext>, never overwritten. This holds for two bodies of the same model that report no serial number and therefore share a subdirectory: before skipping files a destination appears to already hold, such a camera is asked for a small sample of them and the bytes are compared, so a second body's photos are kept rather than dropped. Re-running is cheap: a body with a serial number transfers nothing it already delivered. Any file the card lists that does not reach the destination is reported by name. Cost: this tool runs to completion synchronously and does not return early. A full card can take many minutes, up to the 1 hour default timeout, which is longer than most MCP clients wait for a single request. Progress is observable while it runs by tailing the .import.log file in the destination directory.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "destination": {
+          "type": "string",
+          "description": "Target directory for copied files. Default: ~/Pictures/import-YYYY-MM-DD/"
+        },
+        "camera_port": {
+          "type": "string",
+          "description": "gphoto2 port string (e.g. 'usb:002,002'). Required when multiple cameras are connected."
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "description": "Overall time budget for the transfer from one camera, shared across all of its folders (not per folder). Default: 3600 (1 hour). On timeout, re-run the tool to resume \u2014 already-copied files are skipped."
+        }
+      }
+    }
+  },
+  {
+    "name": "extract_previews",
+    "description": "Extract auto-rotated JPEG previews from a directory of raw files (NEF/CR2/ARW/DNG/etc) for vision-based rating. Each preview is rotated upright via EXIF orientation and resized to max_dim (default 1024). A smaller thumb_dim (default 384) is also written for token-efficient first-pass culling. Returns a list of items with preview paths plus an EXIF summary (ISO, shutter, focal, aperture, datetime) per file. The scan is recursive, and the output tree mirrors the source tree, so raws with the same filename in different subdirectories get distinct previews. Read the preview path from each item rather than assuming <output_dir>/<stem>.jpg.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source_dir": {
+          "type": "string",
+          "description": "Directory containing raw files"
+        },
+        "output_dir": {
+          "type": "string",
+          "description": "Where to write JPEGs. Default: <source_dir>/.previews/"
+        },
+        "max_dim": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 4096,
+          "default": 1024,
+          "description": "Longest-edge for the standard preview"
+        },
+        "thumb_dim": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024,
+          "default": 384,
+          "description": "Thumb longest-edge; 0 to skip"
+        },
+        "overwrite": {
+          "type": "boolean",
+          "default": false,
+          "description": "Re-extract even if preview exists"
+        },
+        "max_workers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "description": "Parallel decode workers. Default: min(8, cpu_count). Lower it if the machine is memory-constrained."
+        }
+      },
+      "required": [
+        "source_dir"
+      ]
+    }
+  },
+  {
+    "name": "apply_ratings_batch",
+    "description": "Write XMP sidecars (xmp:Rating) for a batch of {stem: rating} pairs. Each sidecar sits next to its raw file at <raw path>.xmp and is picked up automatically by darktable on import. Rating range: -1 (reject), 0 (unrated), 1-5 (stars). Each rating is also appended to <source_dir>/ratings.jsonl for replay/audit. An existing sidecar is never replaced: only its rating value is rewritten, so darktable edit history survives. A sidecar with no recognisable rating is skipped with an error rather than overwritten.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source_dir": {
+          "type": "string",
+          "description": "Directory holding the raw files"
+        },
+        "ratings": {
+          "type": "object",
+          "description": "Map of file stem (e.g. 'DSC_1234') to rating int in [-1, 5]. When the same stem occurs in more than one subdirectory the bare stem is rejected as ambiguous \u2014 use a source-relative path instead (e.g. 'store_00010001_DCIM_100NCD80/DSC_1234').",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 5
+          }
+        },
+        "log": {
+          "type": "boolean",
+          "default": true,
+          "description": "Append entries to ratings.jsonl"
+        },
+        "force": {
+          "type": "boolean",
+          "default": false,
+          "description": "Destructive: replace an existing sidecar wholesale instead of patching its rating. This discards any darktable edit history in that file. Only use when the user has explicitly asked to reset the sidecars."
+        }
+      },
+      "required": [
+        "source_dir",
+        "ratings"
+      ]
+    }
+  },
+  {
+    "name": "open_in_darktable",
+    "description": "Launch the darktable GUI on a folder. The folder is registered as a film roll on first launch and XMP sidecars are picked up automatically. The lighttable opens already filtered via the official `darktable.gui.libs.collect.filter` Lua API for any rating spec: exact `rating=N`, `rating_min=N` (>=), `rating_max=N` (<=), arbitrary `rating_min..rating_max` inner ranges, or no filter at all.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source_dir": {
+          "type": "string",
+          "description": "Folder containing the raw files"
+        },
+        "rating": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 5,
+          "description": "Filter to exactly this rating (-1=reject, 0=unrated, 1-5=stars)"
+        },
+        "rating_min": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 5,
+          "description": "Lower bound of a rating range"
+        },
+        "rating_max": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 5,
+          "description": "Upper bound of a rating range"
+        },
+        "darktable_path": {
+          "type": "string",
+          "default": "darktable",
+          "description": "darktable executable (default: 'darktable' on PATH)"
+        }
+      },
+      "required": [
+        "source_dir"
+      ]
+    }
+  },
+  {
+    "name": "export_images",
+    "description": "Export photos to JPEG/PNG/TIFF via darktable-cli. Read actual output paths from the JSONL details file; names are collision-safe. Pass absolute file paths in photo_ids \u2014 the `path` field from view_photos drops in directly. IMPORTANT if any photo has multiple duplicates/versions (darktable's own duplicate manager): without an explicit xmp_paths entry, darktable-cli auto-detects `<path>.xmp` -- always the BASE/version-0 duplicate's sidecar, silently ignoring any other version, even the one currently open in darkroom (bugreport 2026-07-31: exported an older edit instead of the one being worked on). Pass the `sidecar` field from view_photos or get_current_image in xmp_paths (same order/length as photo_ids, use null for entries that should use the default) whenever you're exporting a SPECIFIC edited version rather than a fresh, never-duplicated image.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "photo_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Absolute paths to source images"
+        },
+        "max_width": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum output width in pixels"
+        },
+        "max_height": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum output height in pixels"
+        },
+        "xmp_paths": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": "Optional, same length/order as photo_ids: explicit .xmp sidecar path per file (from view_photos's/get_current_image's `sidecar` field) -- see the tool description for why this matters on a duplicated/versioned image. null (or a shorter list) falls back to darktable-cli's own auto-detected sidecar for that entry."
+        },
+        "output_path": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "jpeg",
+            "png",
+            "tiff"
+          ]
+        },
+        "quality": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "photo_ids",
+        "output_path",
+        "format"
+      ]
+    }
+  },
+  {
+    "name": "open_image_in_darkroom",
+    "description": "Open a photo in the darktable darkroom so its edit can be inspected and changed. Call this FIRST, before list_modules/get_params/set_params/get_preview, which all act on whichever image is currently open. image_id comes from view_photos. Requires darktable to be running with the darktable-mcp Lua bridge loaded.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "image_id": {
+          "type": "integer",
+          "description": "Image id (from view_photos) to open in darkroom"
+        }
+      },
+      "required": [
+        "image_id"
+      ]
+    }
+  },
+  {
+    "name": "navigate_photo",
+    "description": "Move to the next or previous photo in the currently open lighttable collection and open it in darkroom, replacing whatever image is open now. Requires an image already open in darkroom (open_image_in_darkroom or opened by hand) so there's a reference point to move from. Ordering matches get_contact_sheet's sort/direction (default: filename asc) -- pass the same sort/direction_order to stay consistent with the sheet you're paging through. Errors clearly at either end of the collection instead of wrapping around.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "direction": {
+          "type": "string",
+          "enum": [
+            "next",
+            "previous"
+          ],
+          "description": "Which neighbor to open"
+        },
+        "sort": {
+          "type": "string",
+          "enum": [
+            "filename",
+            "image_id",
+            "capture_time",
+            "rating"
+          ],
+          "default": "filename",
+          "description": "Ordering to compute 'neighbor' from"
+        },
+        "direction_order": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "asc",
+          "description": "asc/desc for the sort key above"
+        }
+      },
+      "required": [
+        "direction"
+      ]
+    }
+  },
+  {
+    "name": "get_current_image",
+    "description": "Report which image is currently open in the darktable darkroom: {has_image, id, path, filename}. Works whether the image was opened via open_image_in_darkroom OR opened BY HAND in the GUI. Use it to confirm the edit target before other darkroom tools, or to recover the image id/path when you did not open the image yourself. has_image=false means no image is open in darkroom yet.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "list_modules",
+    "description": "List the processing modules active on the image currently open in darkroom (exposure, white balance/temperature, colorbalancergb, tonecurve, ...), each as {op, instance, enabled}. Call this first to discover which op names exist on this image before calling get_params/set_params \u2014 op must match one of these exactly. instance is 0 for the base copy of a module and increments for extra masked instances (add_instance, Phase 2).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "get_params",
+    "description": "Read the current field values of one module instance on the open image, e.g. get_params('exposure') returns {'exposure': {'value':0.0,'min':-3.0,'max':3.0,'default':0.0}, 'black': {...}, ...}. Scalar/bool/enum fields come back with value/min/max/default; array-valued fields (e.g. colorbalancergb, channelmixerrgb mixing rows, tonecurve nodes) come back as arrays. Always call this before set_params so a proposed new value can be grounded in the real min/max/default rather than guessed \u2014 e.g. before proposing '+0.35 EV' for exposure, check its max is at least that far above the current value. Note: get_params does not surface per-index min/max for array fields.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module operation name, e.g. 'exposure', 'temperature', 'colorbalancergb' (see list_modules)"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the module instance; 0 = base instance"
+        }
+      },
+      "required": [
+        "op"
+      ]
+    }
+  },
+  {
+    "name": "set_params",
+    "description": "Write one or more fields on a module instance of the open image (e.g. set_params('exposure', {'exposure': -1.5})), commit them to darkroom history, and reprocess. Scalar, bool and enum fields are supported, AND whole-array field writes work too \u2014 e.g. set_params('channelmixerrgb', {'grey': [0.65, 0.28, 0.07, 0]}) sets a float[4] mixing row, and tonecurve/colorbalancergb array fields can be written wholesale. Caveat: arrays are replaced whole (no partial single-index write). Requested values are ALWAYS CLAMPED to that field's min/max from get_params \u2014 they are never rejected. The returned report has 'applied' (the values actually written, post-clamp), 'clamped' (a list of {field, requested, applied, min, max} for every field that hit a bound \u2014 if the user's ask exceeded a bound, tell them, e.g. 'that's already at max, +5 EV clamped to +3 EV'), and 'unknown_fields' (names that don't exist on this module, ignored rather than fatal). fields may also include a convenience 'enabled': true/false \u2014 it is routed to enable_module BEFORE the rest of fields is applied and never appears in unknown_fields, so a module that's off by default (grain, sharpen, vignette, tonecurve, ...) can be enabled and configured in one call, e.g. set_params('sharpen', {'enabled': True, 'amount': 2.0}). After calling this, call get_preview() to see the visual result before deciding on a further nudge.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module operation name, e.g. 'exposure' (see list_modules)"
+        },
+        "fields": {
+          "type": "object",
+          "description": "Map of field name to new value, e.g. {'exposure': -1.5}. Field names come from get_params(op). An optional 'enabled' bool is a convenience routed to enable_module instead of the native set_params call."
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the module instance; 0 = base instance"
+        }
+      },
+      "required": [
+        "op",
+        "fields"
+      ]
+    }
+  },
+  {
+    "name": "get_blend_params",
+    "description": "Read a module's BLEND state (opacity, blend mode, mask mode) -- a SEPARATE flat struct from the introspected fields get_params returns, so it needs its own tool. This is how you check/adjust a module's overall strength when the module itself has no 'amount' field of its own -- e.g. lut3d, which is otherwise all-or-nothing at 100%. opacity is 0..100 (percent, matches the GUI's own blend-opacity slider). mask_mode is a bitmask (0=off, 1=uniformly/opacity-only, higher bits = drawn/parametric/raster masks already set up by other tools -- treat it as informational here, see set_blend_params for the one safe write path).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module operation name, e.g. 'lut3d' (see list_modules)"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the module instance; 0 = base instance"
+        }
+      },
+      "required": [
+        "op"
+      ]
+    }
+  },
+  {
+    "name": "set_blend_params",
+    "description": "Set a module's overall blend opacity (0..100 percent, e.g. 30 for a subtle LUT/effect, 100 for full strength) -- the fix for modules like lut3d that have no 'amount' of their own and are otherwise all-or-nothing. Pass enable_uniform_blend=true the FIRST time you set opacity on a module (mask_mode defaults to fully off, so opacity alone is a silent no-op until this is set once); it OVERWRITES mask_mode wholesale to plain uniform blending -- do NOT use this on a module you've masked via mask_object/mask_raster/retouch/set_raster_source, since it would clobber that mask wiring. Those tools manage their own blend_params bits directly; this one is for the simple 'run this module at X% strength, no mask' case.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module operation name, e.g. 'lut3d' (see list_modules)"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the module instance; 0 = base instance"
+        },
+        "opacity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Blend opacity, 0..100 percent; clamped, never rejected"
+        },
+        "enable_uniform_blend": {
+          "type": "boolean",
+          "description": "true: set mask_mode to plain uniform blending (opacity applies, no mask). false: disable blending entirely (module runs at native 100%, opacity ignored). Omit to leave mask_mode untouched -- only do this if you already know it's set up correctly."
+        },
+        "blend_mode": {
+          "type": "integer",
+          "description": "Advanced: raw dt_develop_blend_mode_t value; omit unless you specifically need a non-normal blend mode"
+        }
+      },
+      "required": [
+        "op"
+      ]
+    }
+  },
+  {
+    "name": "list_masks",
+    "description": "List EVERY drawn mask shape in the current image, regardless of which module(s) currently use it -- so you can find a shape drawn earlier (by hand in the GUI, or via add_path_mask/mask_object/retouch_add_shape earlier this session) and wire it into a NEW module instance with attach_mask, instead of guessing its formid or redrawing it. Each entry reports `used_by` (which op/instance pairs already reference this shape) -- a shape can legally back several modules at once.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "get_module_mask",
+    "description": "Read module (op, instance)'s full mask state in one call: the group-level opacity/mask_mode/blend_mode/invert (from get_blend_params) PLUS the list of drawn shapes wired into its blend group, each with its own boolean-combine operation (union/intersection/difference/exclusion) and per-shape invert. Use this before attach_mask/detach_mask to see what is already there, and after them to confirm the change landed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module operation name, e.g. 'exposure' (see list_modules)"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the module instance; 0 = base instance"
+        }
+      },
+      "required": [
+        "op"
+      ]
+    }
+  },
+  {
+    "name": "get_mask_geometry",
+    "description": "Read one drawn mask's full point geometry: for a path/brush shape, every node's corner/ctrl1/ctrl2/border(feather) coordinates plus a per-node state code; for circle/ellipse, its single center/radius descriptor. Use this to verify a mask's actual shape after creation (e.g. whether a node is a smooth or a corner point: ctrl1/ctrl2 equal to corner means corner, differing means smooth -- there is no single 'smooth' flag on the mask as a whole, it's per node) instead of re-segmenting to check. Points are in the same PIPE-INPUT/mask-frame convention add_path_mask expects on write -- NOT the display frame get_preview renders (see mask_object's bbox_display_frame/bbox_mask_frame for that distinction).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mask_id": {
+          "type": "integer",
+          "description": "The shape's own formid -- from list_masks/list_all_masks, or the 'formid' returned by add_path_mask/mask_object/retouch_add_shape."
+        }
+      },
+      "required": [
+        "mask_id"
+      ]
+    }
+  },
+  {
+    "name": "rename_mask",
+    "description": "Give a drawn mask a caller-chosen name instead of the auto-generated 'path #7'/'circle #3' -- useful once a session has created several masks and formid alone is hard to keep straight (e.g. name one 'model body', another 'background sky'). Purely cosmetic -- does not touch geometry, opacity, or which module(s) reference the shape.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mask_id": {
+          "type": "integer",
+          "description": "The shape's own formid (see get_mask_geometry)"
+        },
+        "name": {
+          "type": "string",
+          "description": "New display name for the mask"
+        }
+      },
+      "required": [
+        "mask_id",
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "delete_mask",
+    "description": "Permanently delete a drawn mask shape, whether or not it's currently attached to any module -- unlike detach_mask, which only unwires a shape from ONE module's blend group and leaves the shape itself around forever. Use this to clean up an orphan/unwanted mask (e.g. left over from calibration or a failed attempt) that list_all_masks shows with an empty or stale `used_by`. Every module still referencing this shape loses that reference (mirrors darktable's own mask-manager delete action).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "mask_id": {
+          "type": "integer",
+          "description": "The shape's own formid (see list_all_masks/get_mask_geometry)"
+        }
+      },
+      "required": [
+        "mask_id"
+      ]
+    }
+  },
+  {
+    "name": "attach_mask",
+    "description": "Wire an EXISTING drawn mask shape (formid, from list_masks or the return value of add_path_mask/mask_object/retouch_add_shape) into module (op, instance)'s blend group WITHOUT copying it -- the same shape stays a single underlying object, now referenced by this module IN ADDITION to whatever already used it. Typical use: draw shapes once by hand in the GUI (or via add_path_mask), create several new module instances (add_instance), then attach the right shape(s) to each instance's mask instead of redrawing per instance. Fails loudly if formid does not exist or the module does not support blending -- never silently no-ops. Also turns the module's drawn-mask blend bit ON (equivalent to clicking the mask pencil icon in the GUI) and verifies it stuck by reading blend params back -- otherwise the shape would be wired in but invisible/inactive until someone toggled it by hand.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module operation name, e.g. 'exposure' (see list_modules)"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the module instance; 0 = base instance"
+        },
+        "formid": {
+          "type": "integer",
+          "description": "Shape id to attach, from list_masks() or a mask-creating tool's return value"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "union",
+            "intersection",
+            "difference",
+            "exclusion"
+          ],
+          "default": "union",
+          "description": "How this shape combines with whatever else is already in the module's mask group. Irrelevant for the first shape attached to an empty group."
+        }
+      },
+      "required": [
+        "op",
+        "formid"
+      ]
+    }
+  },
+  {
+    "name": "detach_mask",
+    "description": "Unwire a drawn mask shape from module (op, instance)'s blend group WITHOUT deleting the shape itself -- it stays available in list_masks() and can be re-attached (to this module or a different one) via attach_mask. If this was the LAST shape in the group, the module's mask is fully cleared (mirrors the GUI's own 'no masks' action) -- expected, not an error.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module operation name, e.g. 'exposure' (see list_modules)"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the module instance; 0 = base instance"
+        },
+        "formid": {
+          "type": "integer",
+          "description": "Shape id to detach, from get_module_mask/list_masks"
+        }
+      },
+      "required": [
+        "op",
+        "formid"
+      ]
+    }
+  },
+  {
+    "name": "set_module_mask",
+    "description": "Replace module (op, instance)'s ENTIRE set of attached shapes in one call: shapes not in the new list are detached (not deleted -- still available for other modules), shapes in the new list that are not yet attached are attached, and shapes already attached with a DIFFERENT operation are re-attached with the new one. Optionally also sets the group's overall opacity/invert in the same call (forwarded to set_blend_params). Prefer attach_mask/detach_mask for a single incremental change; use this when you know the FULL desired shape list up front (e.g. scripting several new instances from the same set of hand-drawn shapes).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module operation name, e.g. 'exposure' (see list_modules)"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the module instance; 0 = base instance"
+        },
+        "shapes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "formid": {
+                "type": "integer"
+              },
+              "operation": {
+                "type": "string",
+                "enum": [
+                  "union",
+                  "intersection",
+                  "difference",
+                  "exclusion"
+                ],
+                "default": "union"
+              }
+            },
+            "required": [
+              "formid"
+            ]
+          },
+          "description": "The complete desired shape list (formid + combine operation each). Empty list clears the module's mask."
+        },
+        "opacity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Optional: also set overall blend opacity (0..100), forwarded to set_blend_params"
+        },
+        "invert": {
+          "type": "boolean",
+          "description": "Optional: also set the whole-group mask polarity, forwarded to set_blend_params"
+        }
+      },
+      "required": [
+        "op",
+        "shapes"
+      ]
+    }
+  },
+  {
+    "name": "enable_module",
+    "description": "Turn a module instance on or off and commit to darkroom history. Many modules ship OFF by default (grain, sharpen, vignette, tonecurve, ...) and produce NO visible effect until enabled, even after set_params \u2014 call this before (or together, via set_params's 'enabled' convenience field) writing params on those. Also useful to A/B a module's effect by toggling it and comparing get_preview() output.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module operation name, e.g. 'grain', 'sharpen' (see list_modules)"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "True to enable, false to disable"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the module instance; 0 = base instance"
+        }
+      },
+      "required": [
+        "op",
+        "enabled"
+      ]
+    }
+  },
+  {
+    "name": "list_luts",
+    "description": "List LUT files (.cube, .3dl, .png haldclut) under the lut3d module's configured root directory -- the SAME folder darktable's own file-chooser dropdown reads (plugins/darkroom/lut3d/def_path), so this listing matches what a human sees in the UI. Each result: {name, path, format, category}; for .cube files, 'title' and 'size' (LUT_3D_SIZE, e.g. 17/33/65) are included when the file's header declares them. 'path' is relative to the root and is exactly what set_params's lut3d 'filepath' field expects -- copy it straight through, no further resolution needed. 'category' is the LUT's first-level subfolder (e.g. 'FG'), '' if it sits directly in the root. Scans recursively regardless of 'directory' (the UI's own combobox only shows one folder at a time; this surfaces the whole tree, or a scoped subtree when 'directory' is given). Fails with a clear message if no LUT folder has ever been configured in darktable.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "string",
+          "description": "Optional subdirectory under the LUT root to scope the scan to, e.g. 'FG'. Omit to scan the whole root."
+        }
+      }
+    }
+  },
+  {
+    "name": "preview_lut",
+    "description": "Try a LUT (path from list_luts) on the open image WITHOUT a lasting edit: apply it to lut3d, render a preview, then restore lut3d to exactly the state it was in before this call (filepath, colorspace, interpolation, enabled/disabled) -- so trying 20 LUTs in a row leaves darkroom history unchanged. Note darktable already coalesces consecutive edits of the SAME module into one history entry, so even set_params directly would not spam history; this tool's real job is the automatic restore, not history hygiene. Fails validation up front if the resolved file does not exist under the LUT root (see list_luts). colorspace/interpolation are optional strings -- check get_params('lut3d').fields.colorspace.options / .interpolation.options for the valid enum labels; omit either to keep whatever lut3d is currently set to.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "LUT path relative to the configured root (list_luts' 'path' field)"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the lut3d module instance; 0 = base instance"
+        },
+        "colorspace": {
+          "type": "string",
+          "description": "Optional enum label, e.g. 'DT_IOP_SRGB'; omit to keep current"
+        },
+        "interpolation": {
+          "type": "string",
+          "description": "Optional enum label, e.g. 'DT_IOP_TETRAHEDRAL'; omit to keep current"
+        },
+        "opacity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Optional blend opacity 0..1 (lut3d has no 'amount' of its own -- e.g. 0.3 for a subtle look). Restored afterward along with everything else. Refused if this instance already has a mask configured (see set_blend_params) -- omit to run the LUT at its current blend state."
+        },
+        "max_w": {
+          "type": "integer",
+          "default": 1024
+        },
+        "max_h": {
+          "type": "integer",
+          "default": 1024
+        },
+        "region": {
+          "type": "object",
+          "description": "Optional {x,y,w,h} normalized 0..1 sub-rectangle, same convention as get_preview"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    }
+  },
+  {
+    "name": "compare_luts",
+    "description": "Render the SAME open image once per LUT in `paths` (each via preview_lut -- applied, rendered, restored, one at a time) and stitch the results into one labelled grid image so several looks can be judged side by side in a single glance instead of N separate preview_lut calls. NOT atomic across paths: each LUT is independently applied and restored, so one bad path (missing file, invalid enum) shows as an ERROR cell labelled with its path rather than aborting the rest. colorspace/interpolation, if given, apply to every LUT in the comparison.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "description": "LUT paths relative to the configured root (list_luts' 'path' field)"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the lut3d module instance; 0 = base instance"
+        },
+        "colorspace": {
+          "type": "string",
+          "description": "Optional enum label applied to every LUT in the comparison"
+        },
+        "interpolation": {
+          "type": "string",
+          "description": "Optional enum label applied to every LUT in the comparison"
+        },
+        "opacity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Optional blend opacity 0..1 applied to every LUT in the comparison, same as preview_lut's"
+        },
+        "columns": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1
+        },
+        "cell_width": {
+          "type": "integer",
+          "default": 480,
+          "description": "Per-cell render width in pixels (shrunk if the grid would exceed the max sheet width)"
+        },
+        "background": {
+          "type": "string",
+          "enum": [
+            "dark",
+            "light"
+          ],
+          "default": "dark"
+        }
+      },
+      "required": [
+        "paths"
+      ]
+    }
+  },
+  {
+    "name": "add_instance",
+    "description": "Add a new masked/parametric instance of a module (mirrors the GUI 'new instance' action) and return its instance index. This is the base step for local edits \u2014 e.g. a second 'exposure' instance for local dodge/burn, or a second 'sharpen' instance masked to one area \u2014 since instance 0 stays the global edit and the new instance can be masked and adjusted independently via get_params/set_params with instance=<returned index>. Call list_modules() afterward to see both instances.\n\nIMPORTANT for local edits: a new instance is created by COPYING instance 0's params verbatim, not by recomputing this module's own defaults for a fresh instance \u2014 for some modules that copy is wrong for a LOCAL edit. exposure is the known case: instance 0 typically has compensate_exposure_bias/compensate_hilite_pres on (global exposure compensation), but a local dodge/burn instance almost always wants both OFF so its exposure value is a pure, unadjusted offset. Pass `fields` to set the new instance's initial params in the SAME call/history entry, instead of a separate set_params call after the fact.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module operation name, e.g. 'exposure' (see list_modules)"
+        },
+        "fields": {
+          "type": "object",
+          "description": "Optional initial param overrides for the new instance, applied in the same history entry as its creation. Same field names/semantics as set_params(op). For a local exposure instance: {'compensate_exposure_bias': false, 'compensate_hilite_pres': false}."
+        }
+      },
+      "required": [
+        "op"
+      ]
+    }
+  },
+  {
+    "name": "get_viewport",
+    "description": "Read the darkroom canvas zoom/pan state for the main window and, if open on a second monitor, the preview2 window ({'main': {...}, 'preview2': {'active': bool, ...}}). Use this to know what part/zoom of the image the user is currently looking at. Each viewport carries a ready-to-use 'region' {x,y,w,h} (top-left, normalized 0..1, clamped to [0,1]) = the crop of the full image visible in that window: pass it STRAIGHT INTO get_preview's 'region' argument to render exactly that crop at full detail. Do NOT use the raw 'zoom_x'/'zoom_y' fields for that \u2014 they are center-relative and can be negative, so they are not valid as a top-left region. 'region' is absent when the viewport has no processed pipe yet or preview2 is inactive (treat as full-frame).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "get_preview",
+    "description": "Render a PNG of the CURRENT LIVE darkroom edit (the in-memory pixelpipe result after your set_params calls) and return its file path so you can view it. This does NOT write to the database or XMP sidecar \u2014 it's a cheap, repeatable look at the live edit. Call it after every set_params (or a small batch of them) to check the visual effect before proposing the next adjustment \u2014 this is the 'preview' step of the discuss -> edit -> preview -> iterate loop. max_w/max_h cap the rendered size (aspect ratio preserved, never upscaled beyond the darkroom's own preview resolution). Pass 'region' ({x,y,w,h}, each normalized 0..1 of the visible frame) to render just a sub-rectangle at full detail instead of the whole downscaled frame \u2014 use this to inspect grain/sharpening/noise, which are easy to miss at full-frame scale; pair it with get_viewport() to match the region the user is actually looking at.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "max_w": {
+          "type": "integer",
+          "default": 1024,
+          "minimum": 16,
+          "description": "Maximum preview width in pixels"
+        },
+        "max_h": {
+          "type": "integer",
+          "default": 1024,
+          "minimum": 16,
+          "description": "Maximum preview height in pixels"
+        },
+        "return_image": {
+          "type": "boolean",
+          "default": true,
+          "description": "Return the render inline as a viewable image (default true). Set false for metadata/path/url only when you don't need to see it."
+        },
+        "inline_max_dim": {
+          "type": "integer",
+          "default": 1024,
+          "minimum": 64,
+          "description": "Longest-side cap (px) for the inline image. It is downscaled + JPEG-encoded to this so it always fits the client's inline-image budget; the full-res PNG stays at the returned path/url."
+        },
+        "region": {
+          "type": "object",
+          "description": "Optional sub-rectangle to render at full detail: {x,y,w,h}, each normalized 0..1 of the visible frame (x,y = top-left corner).",
+          "properties": {
+            "x": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "y": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "w": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "h": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "viewport": {
+          "type": "string",
+          "enum": [
+            "main",
+            "preview2"
+          ],
+          "description": "Optional: read the darkroom canvas's own pipe instead of the default fixed-resolution preview pipe -- use after set_viewport to actually see the zoomed-in detail. Omit for the original behavior (unrelated to any darkroom zoom)."
+        }
+      }
+    }
+  },
+  {
+    "name": "capture_viewport",
+    "description": "Snapshot the region + a full-detail render of what the user is CURRENTLY looking at in 'main' or 'preview2' (the external/second-monitor darkroom window), so you can pick retouch points directly off this render's own pixels or 0..1 frame instead of the full image. Returns a snapshot_id -- pass it to retouch_add_shape_in_viewport / retouch_update_shape_in_viewport so the point you pick and the render you looked at are guaranteed to agree. The snapshot is BOUND to the image open in darkroom at capture time: a later add/update call refuses to write if darktable has moved to a different image, instead of retouching the wrong photo. Pixel coordinates you pass later are pixels of THIS render (the reported render WxH), not of the darktable window. The snapshot is BEST-EFFORT, not atomic (region and render come from two sequential reads): fine as long as the user isn't actively panning/zooming mid-call. Snapshots expire after a few minutes -- re-capture if a later add/update call reports snapshot_not_found_or_expired. Errors with viewport_not_active if 'preview2' is requested but the second window isn't open. Reads pixels from THIS viewport's own darkroom canvas pipe, so it actually reflects a prior set_viewport zoom: call set_viewport to zoom into a region first, then capture_viewport to get that region at up to the darkroom window's own resolution devoted entirely to it, instead of a fixed-resolution full-image render cropped down to a small, low-detail sliver.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "viewport": {
+          "type": "string",
+          "enum": [
+            "main",
+            "preview2"
+          ],
+          "default": "main",
+          "description": "Which darkroom window to capture"
+        },
+        "max_w": {
+          "type": "integer",
+          "default": 1400,
+          "minimum": 16,
+          "description": "Maximum render width in pixels"
+        },
+        "max_h": {
+          "type": "integer",
+          "default": 1400,
+          "minimum": 16,
+          "description": "Maximum render height in pixels"
+        },
+        "return_image": {
+          "type": "boolean",
+          "default": true,
+          "description": "Return the render inline (downscaled JPEG) as well as its path"
+        }
+      }
+    }
+  },
+  {
+    "name": "set_viewport",
+    "description": "Write the darkroom zoom/pan for 'main' or 'preview2' -- the counterpart to get_viewport()/capture_viewport, whose render detail is otherwise capped by whatever zoom the human last happened to leave it at. Give exactly ONE of 'region' (a sub-rectangle of the full PROCESSED, post-crop frame, normalized 0..1, top-left origin -- the SAME frame get_viewport().region / get_preview(region=...) use, no third coordinate frame), 'scale' (1.0 = 100%, 1 image px : 1 screen px; keeps the current pan), or 'mode' (fit/fill/100%/200%). If the requested region's aspect does not match the window, the region is EXPANDED (never cropped) about its own center so the whole request stays visible -- see 'aspect_adjusted'/'achieved.region' in the response. By default (wait_for_pipe=true) this blocks until the pipe has actually reprocessed at the new zoom before returning, so an immediately-following capture_viewport never returns a stale, pre-zoom render -- if the bounded wait times out, 'pipe_ready' is false rather than a false 'ok'. 'scale' is clamped to darktable's own zoom range; check 'clamped' for whether that happened. Errors with viewport_not_active if 'preview2' is requested but the second window is not open (no state change). capture_viewport(same viewport)/get_preview(viewport=...) now actually read this zoom's own pipe, so a tight region here genuinely yields more usable detail for that region -- 'renderable_px' in the response is a real probe of what capture_viewport will actually return at the achieved region. Its ceiling is the darkroom window's own pixel size, not a fixed preview budget -- 'min_render_px_across' is honored on a best-effort basis against that ceiling: any non-full-image region already zooms in AT LEAST to it by construction, so if the probe still falls short this does NOT chase it with further zoom (there is nothing further zoom could do -- see 'note' in the response when this happens) and does NOT report a false success. Call restore_viewport with the returned 'previous' when done, so you don't leave the human's darkroom zoomed into a random detail.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "viewport": {
+          "type": "string",
+          "enum": [
+            "main",
+            "preview2"
+          ],
+          "default": "main",
+          "description": "Which darkroom window to zoom/pan"
+        },
+        "region": {
+          "type": "object",
+          "description": "Sub-rectangle of the full processed frame to show, normalized 0..1, top-left origin: {x,y,w,h}. Mutually exclusive with scale/mode.",
+          "properties": {
+            "x": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "y": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "w": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "h": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "scale": {
+          "type": "number",
+          "description": "Absolute zoom scale, 1.0 = 100%. Keeps the current pan. Mutually exclusive with region/mode."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "fit",
+            "fill",
+            "100%",
+            "200%"
+          ],
+          "description": "Named zoom preset. Mutually exclusive with region/scale."
+        },
+        "min_render_px_across": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Best-effort hint only -- see the tool description's IMPORTANT note. Reports min_render_px_across_satisfied instead of silently pretending success when it can't be met."
+        },
+        "wait_for_pipe": {
+          "type": "boolean",
+          "default": true,
+          "description": "Block until the pipe has actually reprocessed at the new zoom before returning."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "default": 4000,
+          "minimum": 100,
+          "description": "Bound for the wait_for_pipe wait, in milliseconds"
+        }
+      }
+    }
+  },
+  {
+    "name": "restore_viewport",
+    "description": "Put a viewport's zoom/pan back exactly as it was before a set_viewport call -- pass the SAME 'previous' object set_viewport (or get_viewport) returned, unmodified. Call this when you are done with a set_viewport-driven retouch/inspection loop so you don't leave the human's darkroom zoomed into a random detail. Same wait_for_pipe/ timeout_ms/pipe_ready semantics as set_viewport; no scale clamping (a state that was once valid is restored as-is). Errors with viewport_not_active if 'preview2' is requested but the second window is not open.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "viewport": {
+          "type": "string",
+          "enum": [
+            "main",
+            "preview2"
+          ],
+          "default": "main",
+          "description": "Which darkroom window to restore"
+        },
+        "previous": {
+          "type": "object",
+          "description": "The exact object set_viewport's/get_viewport's 'previous'/viewport state returned earlier -- {zoom, closeup, zoom_x, zoom_y, scale}."
+        },
+        "wait_for_pipe": {
+          "type": "boolean",
+          "default": true,
+          "description": "Block until the pipe has actually reprocessed at the restored zoom before returning."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "default": 4000,
+          "minimum": 100,
+          "description": "Bound for the wait_for_pipe wait, in milliseconds"
+        }
+      },
+      "required": [
+        "previous"
+      ]
+    }
+  },
+  {
+    "name": "retouch_add_shape_in_viewport",
+    "description": "Like retouch_add_shape, but target/source/radius/feather are given relative to a snapshot from capture_viewport instead of the full image -- the server converts them for you, so you never hand-compute the full-image fraction from a cropped/zoomed render. Rejects (does NOT clamp) target or source points that fall outside the captured viewport/render, and rejects an expired/unknown snapshot_id -- both come back as an explicit error so a stale or wrong point never silently retouches the wrong spot -- as does a snapshot whose image is no longer the one open in darkroom. Set return_preview to get a render of the SAME region back immediately so you can verify the result without a second capture_viewport call.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "description": "snapshot_id from a prior capture_viewport call"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the retouch module instance"
+        },
+        "algorithm": {
+          "type": "string",
+          "enum": [
+            "heal",
+            "clone",
+            "blur",
+            "fill"
+          ],
+          "description": "Retouch algorithm for this shape. heal/clone sample from a separate source point and always affect the full pixel value (texture AND tone). blur/fill have no source -- they only ever act on the target area, and on a NONZERO wavelet_scale they affect texture only, leaving tone/shadow on other scales untouched (the standard fix for wrinkles/pores: heal at scale 0 visibly brightens/flattens shadow it should not touch)."
+        },
+        "coordinate_space": {
+          "type": "string",
+          "enum": [
+            "snapshot_normalized",
+            "snapshot_pixels",
+            "viewport_normalized",
+            "viewport_pixels"
+          ],
+          "default": "snapshot_normalized",
+          "description": "'snapshot_normalized' (alias 'viewport_normalized'): 0..1 within the captured render. 'snapshot_pixels' (alias 'viewport_pixels'): pixel coordinates of the RENDER capture_viewport returned (its reported render WxH) -- NOT the darktable window's pixel size, which is usually larger."
+        },
+        "radius_space": {
+          "type": "string",
+          "enum": [
+            "snapshot_normalized",
+            "snapshot_pixels",
+            "viewport_normalized",
+            "viewport_pixels"
+          ],
+          "description": "Space for 'radius'/'feather'. Defaults to coordinate_space. IMPORTANT: a snapshot_pixels radius is scaled by the render's WIDTH only (never height, never an average) so circle size doesn't depend on the window's aspect ratio."
+        },
+        "shape_type": {
+          "type": "string",
+          "enum": [
+            "circle",
+            "ellipse",
+            "path"
+          ],
+          "default": "circle",
+          "description": "'circle' (default), 'ellipse', or 'path'. brush not yet supported. For 'path', 'target'/'radius' are NOT used -- use 'points' instead."
+        },
+        "radius_b": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Ellipse's second semi-axis, in radius_space units. Only used when shape_type='ellipse'; defaults to 'radius' (a circle-shaped ellipse) if omitted."
+        },
+        "rotation": {
+          "type": "number",
+          "description": "Ellipse rotation in degrees, only used when shape_type='ellipse'. Default 0."
+        },
+        "points": {
+          "type": "array",
+          "minItems": 3,
+          "description": "Polygon nodes, in coordinate_space units. REQUIRED for shape_type='path', REJECTED otherwise.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          }
+        },
+        "smooth": {
+          "type": "boolean",
+          "default": true,
+          "description": "Only used with shape_type='path'. true (default) = Catmull-Rom bezier boundary; false = faceted polygon."
+        },
+        "target": {
+          "type": "object",
+          "description": "Shape center, in coordinate_space units. Not used for shape_type='path'.",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ]
+        },
+        "source": {
+          "type": "object",
+          "description": "Source point to sample from (absolute, not an offset), in coordinate_space units. Required for algorithm='heal'/'clone'; omit for 'blur'/'fill' (they have no source).",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ]
+        },
+        "radius": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Circle/ellipse radius, in radius_space units. Not used for shape_type='path'."
+        },
+        "feather": {
+          "type": "number",
+          "default": 0.0,
+          "minimum": 0,
+          "description": "Soft edge width, in radius_space units. For shape_type='path' this is instead a FRACTION of the path's own bounding box (same as add_path_mask), not a radius_space length."
+        },
+        "opacity": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Shape opacity (1.0 = full effect)"
+        },
+        "wavelet_scale": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Wavelet scale to retouch on; defaults to the module's current scale. Use a NONZERO scale with algorithm='blur' to soften texture (wrinkles, pores) while leaving tone/shadow untouched."
+        },
+        "blur_type": {
+          "type": "string",
+          "enum": [
+            "gaussian",
+            "bilateral"
+          ],
+          "description": "Only used when algorithm='blur'; default = module's current blur_type"
+        },
+        "blur_radius": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 200.0,
+          "description": "Only used when algorithm='blur'; default = module's current blur_radius"
+        },
+        "fill_mode": {
+          "type": "string",
+          "enum": [
+            "erase",
+            "color"
+          ],
+          "description": "Only used when algorithm='fill'; default = module's current fill_mode"
+        },
+        "fill_color": {
+          "type": "object",
+          "description": "Only used when algorithm='fill' and fill_mode='color'; default = module's current fill_color",
+          "properties": {
+            "r": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "g": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "b": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          }
+        },
+        "fill_brightness": {
+          "type": "number",
+          "minimum": -1.0,
+          "maximum": 1.0,
+          "description": "Only used when algorithm='fill'; default = module's current fill_brightness"
+        },
+        "return_preview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render the same captured region again after the edit, for immediate visual verification"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "algorithm"
+      ]
+    }
+  },
+  {
+    "name": "retouch_update_shape_in_viewport",
+    "description": "Move/resize an EXISTING retouch shape (by formid, from retouch_add_shape_in_viewport's response or retouch_list_shapes) in place -- same coordinate conversion and containment rejection as retouch_add_shape_in_viewport, but keeps the shape's identity instead of deleting and recreating it. target/source/radius/feather (circle/ellipse) or points (path) must be resent in full each call (this moves the whole shape, not a single field).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "description": "snapshot_id from a prior capture_viewport call"
+        },
+        "formid": {
+          "type": "integer",
+          "description": "Shape form id to move/resize"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the retouch module instance"
+        },
+        "algorithm": {
+          "type": "string",
+          "enum": [
+            "heal",
+            "clone",
+            "blur",
+            "fill"
+          ],
+          "description": "Optional: change the shape's algorithm; omit to keep it unchanged. Switching TO heal/clone requires 'source'; switching to/staying on blur/fill ignores it (see retouch_add_shape_in_viewport's description for the wavelet-scale texture-vs-tone distinction)."
+        },
+        "coordinate_space": {
+          "type": "string",
+          "enum": [
+            "snapshot_normalized",
+            "snapshot_pixels",
+            "viewport_normalized",
+            "viewport_pixels"
+          ],
+          "default": "snapshot_normalized",
+          "description": "Same convention as retouch_add_shape_in_viewport: snapshot_pixels are pixels of the capture_viewport render, not of the darktable window"
+        },
+        "radius_space": {
+          "type": "string",
+          "enum": [
+            "snapshot_normalized",
+            "snapshot_pixels",
+            "viewport_normalized",
+            "viewport_pixels"
+          ],
+          "description": "Same convention as retouch_add_shape_in_viewport; defaults to coordinate_space"
+        },
+        "target": {
+          "type": "object",
+          "description": "New shape center, in coordinate_space units. Not used when updating a path (pass 'points' instead).",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ]
+        },
+        "source": {
+          "type": "object",
+          "description": "New source point, in coordinate_space units. Required if the shape's EFFECTIVE algorithm (the new one above, or its current one if omitted) is heal/clone; omit for blur/fill.",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ]
+        },
+        "radius": {
+          "type": "number",
+          "minimum": 0,
+          "description": "New circle/ellipse radius, in radius_space units. Not used when updating a path."
+        },
+        "radius_b": {
+          "type": "number",
+          "minimum": 0,
+          "description": "New ellipse second semi-axis, in radius_space units. Only applies if the shape is an ellipse (rejected otherwise); omit to keep its current value."
+        },
+        "rotation": {
+          "type": "number",
+          "description": "New ellipse rotation in degrees. Only applies if the shape is an ellipse; omit to keep its current value."
+        },
+        "points": {
+          "type": "array",
+          "minItems": 3,
+          "description": "New polygon nodes, in coordinate_space units. REQUIRED to update a path shape (a path's geometry IS its point list -- there is no separate target/radius to move independently); REJECTED for any other shape type. REPLACES the entire point list.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          }
+        },
+        "smooth": {
+          "type": "boolean",
+          "default": true,
+          "description": "Only used together with 'points'. true (default) = Catmull-Rom bezier boundary; false = faceted polygon."
+        },
+        "feather": {
+          "type": "number",
+          "default": 0.0,
+          "minimum": 0,
+          "description": "New soft edge width, in radius_space units. When updating a path, this is instead a FRACTION of the path's own bounding box (same as add_path_mask), not a radius_space length."
+        },
+        "opacity": {
+          "type": "number",
+          "description": "Optional: change the shape's opacity; omit to leave it unchanged"
+        },
+        "wavelet_scale": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Optional: change the wavelet scale; omit to keep it unchanged"
+        },
+        "blur_type": {
+          "type": "string",
+          "enum": [
+            "gaussian",
+            "bilateral"
+          ],
+          "description": "Optional, only used when the effective algorithm is 'blur'; omit to keep the shape's current value"
+        },
+        "blur_radius": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 200.0,
+          "description": "Optional, only used when the effective algorithm is 'blur'; omit to keep the shape's current value"
+        },
+        "fill_mode": {
+          "type": "string",
+          "enum": [
+            "erase",
+            "color"
+          ],
+          "description": "Optional, only used when the effective algorithm is 'fill'; omit to keep the shape's current value"
+        },
+        "fill_color": {
+          "type": "object",
+          "description": "Optional, only used when the effective algorithm is 'fill' and fill_mode='color'; omit to keep the shape's current value",
+          "properties": {
+            "r": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "g": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "b": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          }
+        },
+        "fill_brightness": {
+          "type": "number",
+          "minimum": -1.0,
+          "maximum": 1.0,
+          "description": "Optional, only used when the effective algorithm is 'fill'; omit to keep the shape's current value"
+        },
+        "return_preview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render the same captured region again after the edit, for immediate visual verification"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "formid"
+      ]
+    }
+  },
+  {
+    "name": "retouch_delete_shapes",
+    "description": "Delete multiple retouch shapes by formid in one call -- batch version of retouch_delete_shape, so cleaning up several wrong points doesn't need one approval per shape. NOT atomic: each formid is deleted independently, so check the 'failed' list in the response.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the retouch module instance"
+        },
+        "formids": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "minItems": 1,
+          "description": "Shape form ids to remove"
+        }
+      },
+      "required": [
+        "formids"
+      ]
+    }
+  },
+  {
+    "name": "retouch_render_overlay",
+    "description": "Draw the retouch shapes on top of a capture_viewport snapshot so you can SEE where they landed: target circle, feather ring, source circle and the source->target link, labelled by formid. This is how you verify a heal point actually covers the mark, is not oversized, its feather does not spill onto an edge, and its source sits on clean texture -- checks that plain numbers cannot answer. The overlay is drawn by this server from the shape geometry, NOT captured from darktable's own on-screen overlay (that one is painted on the GUI widget and is absent from every render we can read), so it needs no focus, changes no darktable state, and additionally reports overlapping shapes. modes: all_shapes (every shape; highlight_formid optionally dims the rest), selected_shape (one shape prominent, others dimmed for context), source_and_target (only the chosen shape, nothing else), mask_only (the actual mask alpha as a greyscale image, same falloff darktable applies -- use it to judge coverage, not composition). Read-only: refuses if darkroom has moved to another image, since the geometry would then belong to a different photo.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "description": "Snapshot id from capture_viewport (the render to draw on)"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "all_shapes",
+            "selected_shape",
+            "source_and_target",
+            "mask_only"
+          ],
+          "default": "all_shapes",
+          "description": "What to draw (see the tool description)"
+        },
+        "highlight_formid": {
+          "type": "integer",
+          "description": "Shape to emphasise. Required by selected_shape and source_and_target unless the module has exactly one shape; optional for all_shapes"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the retouch module instance"
+        },
+        "label_shapes": {
+          "type": "boolean",
+          "default": true,
+          "description": "Print each shape's formid next to its circle"
+        },
+        "return_image": {
+          "type": "boolean",
+          "default": true,
+          "description": "Return the overlay inline (downscaled JPEG) as well as its path"
+        }
+      },
+      "required": [
+        "snapshot_id"
+      ]
+    }
+  },
+  {
+    "name": "add_path_mask",
+    "description": "You almost certainly want mask_object instead (does vision-pick -> segment -> mask -> edit in one call) -- LOW-LEVEL: attach a drawn polygon path mask to a module instance so its effect only applies inside that shape. Use add_path_mask directly only if you already have a normalized polygon from somewhere (e.g. you already called mask_object and want to attach the same polygon to a different module/instance). points must be an array of >=3 {x,y} nodes normalized 0..1 -- but NOT against get_preview's frame. This is the MASK STORAGE frame: pipe-input, pre-crop, and rotated per EXIF orientation -- NOT the post-crop/post-rotate frame get_preview/capture_viewport render. The two are identical only when no crop/rotate/orientation is active. Hand-computing this frame from a preview image (e.g. deriving it empirically by placing a mask, exporting, and looking where it landed) is the #1 cause of misplaced shapes -- mask_object does this conversion for you internally; prefer it whenever the prompt is point/box/label-shaped instead of an already-known polygon.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module operation name, e.g. 'exposure' (see list_modules)"
+        },
+        "points": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          },
+          "description": "Polygon nodes, normalized 0..1, boundary order"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the module instance to mask"
+        },
+        "opacity": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Mask opacity (1.0 = full effect inside the shape)"
+        },
+        "feather": {
+          "type": "number",
+          "default": 0.02,
+          "minimum": 0.0,
+          "maximum": 0.5,
+          "description": "Edge softening as a FRACTION of the mask's own bounding box (0.02 = 2%), so a small subject gets a proportionally small soft edge instead of a frame-constant halo."
+        },
+        "smooth": {
+          "type": "boolean",
+          "default": true,
+          "description": "Smooth the boundary with Catmull-Rom bezier curves so rounded subjects are not faceted. Set false for a straight-segment polygon."
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional display name for the new mask (default is darktable's own auto-generated 'path #7' etc) -- useful for orientation once a session has created several masks on one image. Equivalent to calling rename_mask right after this returns."
+        }
+      },
+      "required": [
+        "op",
+        "points"
+      ]
+    }
+  },
+  {
+    "name": "add_path_mask_in_viewport",
+    "description": "Like add_path_mask, but points are given relative to a snapshot from capture_viewport instead of the full image -- the server converts every node for you (same two-stage viewport-local -> display-frame -> mask-frame pipeline retouch_add_shape_in_viewport uses), so you never hand-compute the full-image PIPE-INPUT/mask frame from a cropped/zoomed render. Use this whenever the polygon comes from something you SAW in a capture_viewport render (picked by eye, or from a vision model run on that render) rather than mask_object (which segments its own full-frame preview and does not need a viewport at all). Rejects (does NOT clamp) any node that falls outside the captured viewport/render, and rejects an expired/unknown snapshot_id or a snapshot whose image is no longer the one open in darkroom -- both come back as an explicit error so a stale or wrong point never silently masks the wrong area. Set return_preview to get a render of the SAME region back immediately so you can verify the result without a second capture_viewport call; use render_module_mask afterward to SEE the polygon drawn on the render.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "description": "snapshot_id from a prior capture_viewport call"
+        },
+        "op": {
+          "type": "string",
+          "description": "Module operation name, e.g. 'exposure' (see list_modules)"
+        },
+        "points": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          },
+          "description": "Polygon nodes, boundary order, in coordinate_space units (relative to the captured viewport/render, NOT the full image)"
+        },
+        "coordinate_space": {
+          "type": "string",
+          "enum": [
+            "snapshot_normalized",
+            "snapshot_pixels",
+            "viewport_normalized",
+            "viewport_pixels"
+          ],
+          "default": "snapshot_normalized",
+          "description": "'snapshot_normalized' (alias 'viewport_normalized'): 0..1 within the captured render. 'snapshot_pixels' (alias 'viewport_pixels'): pixel coordinates of the RENDER capture_viewport returned (its reported render WxH) -- NOT the darktable window's pixel size, which is usually larger."
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the module instance to mask"
+        },
+        "opacity": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Mask opacity (1.0 = full effect inside the shape)"
+        },
+        "feather": {
+          "type": "number",
+          "default": 0.02,
+          "minimum": 0.0,
+          "maximum": 0.5,
+          "description": "Edge softening as a FRACTION of the mask's own bounding box (0.02 = 2%) -- NOT a viewport/render length, so it is passed through unconverted, same as add_path_mask."
+        },
+        "smooth": {
+          "type": "boolean",
+          "default": true,
+          "description": "Smooth the boundary with Catmull-Rom bezier curves so rounded subjects are not faceted. Set false for a straight-segment polygon."
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional display name for the new mask (see add_path_mask)"
+        },
+        "return_preview": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render the same captured region again after the edit, for immediate visual verification"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "op",
+        "points"
+      ]
+    }
+  },
+  {
+    "name": "render_module_mask",
+    "description": "Draw a module's drawn masks (path/brush polygons, circles) on top of a capture_viewport snapshot so you can SEE where they landed -- the generic-mask counterpart to retouch_render_overlay (which only knows retouch's own circle target/source pairs). Reads the module's attached shapes (list_masks) and each one's full point geometry (get_mask_geometry), forward-transforms mask-frame -> display-frame -> snapshot-render pixels, and draws the boundary through each node -- corner nodes as square markers, smooth (Bezier) nodes as round markers. The drawn boundary is a STRAIGHT-EDGE approximation through the nodes, not darktable's own Catmull-Rom curve, so treat it as 'landed on the right subject', not 'pixel-perfect edge'. modes: all_shapes (every mask; highlight_formid optionally dims the rest), selected_shape (one mask prominent, others dimmed for context), mask_only (a greyscale fill of each mask's interior -- FLAT opacity, does not model darktable's per-node border/feather falloff). 'ellipse' masks are reported as unsupported rather than drawn wrong. Read-only: refuses if darkroom has moved to another image.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "snapshot_id": {
+          "type": "string",
+          "description": "Snapshot id from capture_viewport (the render to draw on)"
+        },
+        "op": {
+          "type": "string",
+          "description": "Module operation name whose drawn masks to render, e.g. 'exposure'"
+        },
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the module instance"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "all_shapes",
+            "selected_shape",
+            "mask_only"
+          ],
+          "default": "all_shapes",
+          "description": "What to draw (see the tool description)"
+        },
+        "highlight_formid": {
+          "type": "integer",
+          "description": "Shape to emphasise. Required by selected_shape unless the module has exactly one drawn mask; optional for all_shapes"
+        },
+        "label_shapes": {
+          "type": "boolean",
+          "default": true,
+          "description": "Print each shape's formid next to its boundary"
+        },
+        "return_image": {
+          "type": "boolean",
+          "default": true,
+          "description": "Return the overlay inline (downscaled JPEG) as well as its path"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "op"
+      ]
+    }
+  },
+  {
+    "name": "retouch_add_shape",
+    "description": "You almost certainly want retouch_add_shape_in_viewport instead -- it takes coordinates in the SAME frame capture_viewport/get_preview render in and converts them for you. This tool's target/source/radius are normalized 0..1 against the MASK STORAGE frame -- pipe-input, pre-crop, rotated per EXIF orientation -- NOT the post-crop/post-rotate frame get_preview renders. Hand-deriving this frame from a preview image is the #1 cause of misplaced shapes. Create a local HEAL, CLONE, BLUR, or FILL circle shape on the retouch module \u2014 the module's actual local-editing surface, distinct from add_path_mask's generic 'restrict this module's blend to a region'. heal/clone fix sensor dust or small marks by sampling a source region onto a target region; blur/fill act on the target area only (no source), optionally on a specific wavelet scale (fine detail vs base tones vs residual). heal/clone always rewrite the full pixel (texture AND tone) regardless of scale; blur/fill on a NONZERO scale affect only that scale's texture, leaving tone/shadow on other scales untouched \u2014 the fix for wrinkles/pores, where heal at scale 0 visibly brightens/flattens shadow it should not touch. 'circle', 'ellipse', and 'path' shapes are supported (brush is a later phase). Requires a retouch module instance to already exist in the open image's history (call enable_module/add_instance first if needed) and darktable running with the darktable-mcp Lua plugin. Call get_preview() afterwards to see the result.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the retouch module instance"
+        },
+        "algorithm": {
+          "type": "string",
+          "enum": [
+            "heal",
+            "clone",
+            "blur",
+            "fill"
+          ],
+          "description": "Retouch algorithm for this shape"
+        },
+        "shape_type": {
+          "type": "string",
+          "enum": [
+            "circle",
+            "ellipse",
+            "path"
+          ],
+          "default": "circle",
+          "description": "'circle' (default), 'ellipse', or 'path'. brush not yet supported. For 'ellipse', 'radius' is the first semi-axis (radius_a) and 'feather' is the border, same convention as circle; see radius_b/rotation. For 'path', 'target'/'radius' are NOT used (a polygon has no single center/radius) -- use 'points' instead, and note 'feather' switches to a FRACTION of the path's own bounding box (same as add_path_mask), not circle/ellipse's absolute value."
+        },
+        "radius_b": {
+          "type": "number",
+          "minimum": 0.0005,
+          "maximum": 0.5,
+          "description": "Ellipse's second semi-axis, only used when shape_type='ellipse'. Same normalization as radius/radius_a (against mask storage frame's mindim(width,height)). Defaults to 'radius' (a circle-shaped ellipse) if omitted."
+        },
+        "rotation": {
+          "type": "number",
+          "description": "Ellipse rotation in degrees, only used when shape_type='ellipse'. Default 0."
+        },
+        "points": {
+          "type": "array",
+          "minItems": 3,
+          "description": "Polygon nodes, normalized 0..1 against the MASK STORAGE frame. REQUIRED for shape_type='path', REJECTED (error) otherwise. Same node format as add_path_mask's 'points'.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          }
+        },
+        "smooth": {
+          "type": "boolean",
+          "default": true,
+          "description": "Only used with shape_type='path'. true (default) = Catmull-Rom bezier boundary; false = faceted straight-segment polygon. Same as add_path_mask's 'smooth'."
+        },
+        "target": {
+          "type": "object",
+          "description": "Shape center, normalized 0..1 against the MASK STORAGE frame (pipe-input, pre-crop) -- NOT get_preview's frame. Use retouch_add_shape_in_viewport instead if unsure. Not used for shape_type='path'.",
+          "properties": {
+            "x": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "y": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ]
+        },
+        "source": {
+          "type": "object",
+          "description": "Source point to sample from, normalized 0..1. Required for algorithm='heal'/'clone' \u2014 this is an ABSOLUTE point, not an offset from target. Omit for 'blur'/'fill' (no source).",
+          "properties": {
+            "x": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "y": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": [
+            "x",
+            "y"
+          ]
+        },
+        "radius": {
+          "type": "number",
+          "minimum": 0.0005,
+          "maximum": 0.5,
+          "description": "Circle radius, normalized 0..1 against the mask storage frame's mindim(width,height) -- see target's description."
+        },
+        "feather": {
+          "type": "number",
+          "default": 0.0,
+          "minimum": 0.0,
+          "maximum": 0.5,
+          "description": "Soft edge width, normalized 0..1"
+        },
+        "opacity": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Shape opacity (1.0 = full effect)"
+        },
+        "wavelet_scale": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Wavelet scale to retouch on: 0 = original image, 1..N = a specific detail scale, N+1 = residual. Defaults to the module's current scale if omitted \u2014 check retouch_list_shapes for num_scales/curr_scale. Use a NONZERO scale with algorithm='blur' to soften texture without touching tone."
+        },
+        "blur_type": {
+          "type": "string",
+          "enum": [
+            "gaussian",
+            "bilateral"
+          ],
+          "description": "Only used when algorithm='blur'; default = module's current blur_type"
+        },
+        "blur_radius": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 200.0,
+          "description": "Only used when algorithm='blur'; default = module's current blur_radius"
+        },
+        "fill_mode": {
+          "type": "string",
+          "enum": [
+            "erase",
+            "color"
+          ],
+          "description": "Only used when algorithm='fill'; default = module's current fill_mode"
+        },
+        "fill_color": {
+          "type": "object",
+          "description": "Only used when algorithm='fill' and fill_mode='color'; default = module's current fill_color",
+          "properties": {
+            "r": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "g": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            },
+            "b": {
+              "type": "number",
+              "minimum": 0.0,
+              "maximum": 1.0
+            }
+          }
+        },
+        "fill_brightness": {
+          "type": "number",
+          "minimum": -1.0,
+          "maximum": 1.0,
+          "description": "Only used when algorithm='fill'; default = module's current fill_brightness"
+        }
+      },
+      "required": [
+        "algorithm"
+      ]
+    }
+  },
+  {
+    "name": "retouch_delete_shape",
+    "description": "Delete a retouch shape by its formid (from retouch_add_shape or retouch_list_shapes). Requires darktable running with the darktable-mcp Lua plugin.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the retouch module instance"
+        },
+        "formid": {
+          "type": "integer",
+          "description": "Shape form id to remove"
+        }
+      },
+      "required": [
+        "formid"
+      ]
+    }
+  },
+  {
+    "name": "retouch_list_shapes",
+    "description": "List the real, currently-attached retouch shapes for a module instance \u2014 unlike get_params(op='retouch'), which exposes the raw 300-slot internal array full of mostly-empty padding, this returns only actual shapes plus the module's wavelet-scale state (num_scales, curr_scale, merge_from_scale). Requires darktable running with the darktable-mcp Lua plugin.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "instance": {
+          "type": "integer",
+          "default": 0,
+          "description": "multi_priority of the retouch module instance"
+        }
+      }
+    }
+  },
+  {
+    "name": "mask_object",
+    "description": "Apply a local edit to ONE object/region of the open image, picked visually \u2014 e.g. brighten a foreground object, darken the sky, adjust a garment. YOU (the vision model) look at a get_preview image, pick point(s) and/or a box on the subject, and pass them here together with the desired adjustment. This tool then: (1) re-renders the full preview frame so coordinates line up exactly with your picks, (2) segments your points/box into a precise object polygon, (3) creates a new masked module instance, (4) attaches the polygon as a path mask so the effect ONLY applies inside the object, (5) applies your adjustment on that instance, and (6) renders a fresh preview so you can confirm the result. Segmentation works OUT OF THE BOX with no extra install: it uses a rough OpenCV GrabCut segmenter bundled in this server. Install the optional SAM2 sidecar (see dist/INSTALL-sidecar.md, or run 'darktable-mcp install-sidecar') for precise, SAM2-quality masks \u2014 when the sidecar is configured and reachable it is tried first and used instead. The result reports which backend was actually used ('sam2' or 'grabcut') so you know the quality tier. Coordinates for points/box are normalized 0..1 against the FULL image frame (same convention as get_preview's own 'region' and get_viewport's 'region' \u2014 if you're looking at a get_preview(region=...) crop, remember its pixels map back into that sub-rectangle, not the full 0..1 range). Give at least one of points or box. On any failure (both segmentation backends down, mask/param write error) nothing is left behind \u2014 no orphan module instance.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module to apply the local edit with, e.g. 'exposure' for a brightness lift, 'colorbalancergb' for a color/tone shift (see list_modules for what's available)"
+        },
+        "adjustment": {
+          "type": "object",
+          "description": "Field map applied via set_params on the new masked instance, e.g. {'exposure': 0.6}. Same shape/clamping rules as set_params's 'fields' \u2014 check get_params(op) first to ground the value in real min/max."
+        },
+        "points": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "y": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "label": {
+                "type": "integer",
+                "enum": [
+                  0,
+                  1
+                ],
+                "default": 1,
+                "description": "1 = include (foreground), 0 = exclude (background)"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          },
+          "description": "One or more prompt points, normalized 0..1 against the full frame. Usually one label:1 point on the object center is enough for SAM2. If the segmented mask bleeds into a nearby distractor (e.g. branches behind a subject, a shadow next to it), add one or more label:0 points ON the distractor to explicitly exclude it -- mixing several label:1 (include) and label:0 (exclude) points in one call is the single cheapest way to fix a wrong-shaped mask without changing anything else."
+        },
+        "box": {
+          "type": "object",
+          "description": "A bounding box around the subject instead of/in addition to points, normalized 0..1: {x,y,w,h}, x/y = top-left corner.",
+          "properties": {
+            "x": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "y": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "w": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "h": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "label": {
+          "type": "string",
+          "description": "Free-text description of the subject (e.g. 'the dog', 'a face', 'the red car'). If given ALONE (no points/box), this is resolved into a real box via Grounding DINO (a text-grounded detector) BEFORE segmentation runs -- SAM2 itself has no text grounding, but this resolution step gives label-only prompts real localization instead of doing nothing. If the described subject isn't found with enough confidence the call fails outright (no guess, no silent whole-image mask) -- pick points/box yourself instead in that case. If points/box are ALSO given, they take priority and this becomes best-effort/inert again (old behavior, unchanged)."
+        },
+        "opacity": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Mask opacity (1.0 = full effect inside the object)"
+        },
+        "new_instance": {
+          "type": "boolean",
+          "default": true,
+          "description": "True (default): create a new masked instance of op, leaving instance 0's global edit untouched. False: mask+edit instance 0 directly (rare \u2014 usually wrong for a 'global' module already in use)."
+        },
+        "smooth": {
+          "type": "boolean",
+          "default": true,
+          "description": "True (default): Bezier-smooth the path between polygon nodes, same as darktable's own drawn-path default. False: sharp corner nodes, no curve interpolation between them -- try this if a segmented mask has visible overshoot loops or bulges on a shape with many sharp concave corners (Bezier smoothing between sparse nodes can overshoot there; corner nodes track the polygon exactly, at the cost of a slightly more angular edge)."
+        },
+        "max_nodes": {
+          "type": "integer",
+          "default": 48,
+          "minimum": 10,
+          "maximum": 200,
+          "description": "The simplifier converges the polygon's node count TOWARD this value (not just a ceiling it rarely reaches -- fixed 2026-07-27, previously raising this had no real effect). Raise it (e.g. 80-140) for a complex/non-convex silhouette (a body in an unusual pose, an object with several limbs/protrusions) that's losing real shape detail at the default -- more nodes track the true contour more closely and reduce Bezier overshoot on sharp concave corners, at the cost of a slightly heavier path for darktable to render."
+        },
+        "min_nodes": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 3,
+          "maximum": 200,
+          "description": "Floor on the simplified polygon's node count -- rarely needs changing (max_nodes is the knob that actually controls detail level); only matters if you also want to force a MINIMUM density on an otherwise very simple/convex shape."
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional display name for the new mask -- NOT the same as `label` (which is a segmentation PROMPT, e.g. 'the red car'; this is just a human-readable name like 'model body' for orientation once a session has created several masks on one image). Default is darktable's own auto-generated 'path #7' etc."
+        }
+      },
+      "required": [
+        "op",
+        "adjustment"
+      ]
+    }
+  },
+  {
+    "name": "mask_raster",
+    "description": "Apply a local edit gated by a SOFT-EDGED alpha matte for subjects with fine or semi-transparent edges (hair, fur, fabric fibers, motion blur, glass, smoke) instead of a hard drawn polygon -- use this instead of mask_object whenever the subject has fine edges a path mask would jag up. It acts on whichever image is currently open in darkroom (call open_image_in_darkroom first) with NO point/box picking needed -- unlike mask_object, the MODNet matting model generates a dense, whole-image, unprompted foreground matte, so there is nothing to pick. Flow: (1) run the image (or, for RAW files the matting model can't read directly, a full-resolution darkroom preview export) through the MODNet matting sidecar to get a continuous 0..1 alpha, (2) write it to a fresh, uniquely-named file and load it into a NEW instance of the stock 'rasterfile' module, (3) create a new (or reuse instance 0 of) the target module, apply your adjustment, (4) wire the target module's blend to consume rasterfile's raster mask via set_raster_source, (5) render a fresh preview. REQUIRES the matting sidecar (MODNet, see dist/INSTALL-sidecar.md) -- there is NO lower-quality fallback (a hard-edged segmenter cannot produce a soft matte, so this errors clearly instead of silently degrading). On ANY failure (matting sidecar down, wiring error) nothing is left behind -- no orphan rasterfile or consumer module instance.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "description": "Module to apply the matte-limited edit with, e.g. 'colorbalancergb' for a warm/cool shift, 'exposure' for a brightness lift (see list_modules)"
+        },
+        "adjustment": {
+          "type": "object",
+          "description": "Field map applied via set_params on the consumer instance, e.g. {'exposure': 0.6}. Check get_params(op) first to ground the value in real min/max."
+        },
+        "opacity": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Overall matte strength (1.0 = the matte's own alpha values apply at full strength; lower values scale the whole effect down uniformly, same convention as mask_object's opacity)."
+        },
+        "new_instance": {
+          "type": "boolean",
+          "default": true,
+          "description": "True (default): create a new masked instance of op, leaving instance 0's global edit untouched. False: mask+edit instance 0 directly."
+        }
+      },
+      "required": [
+        "op",
+        "adjustment"
+      ]
+    }
+  }
+]

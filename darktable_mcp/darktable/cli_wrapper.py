@@ -83,6 +83,8 @@ class CLIWrapper:
     """
 
     EXPORT_TIMEOUT_DEFAULT = 120
+    _config_locks_guard = threading.Lock()
+    _config_locks: dict[Path, threading.Lock] = {}
 
     def __init__(
         self,
@@ -189,7 +191,7 @@ class CLIWrapper:
         darktable_cli_path = shutil.which("darktable-cli")
         if not darktable_cli_path:
             raise DarktableNotFoundError(
-                "darktable-cli executable not found in PATH. " "Please install darktable."
+                "darktable-cli executable not found in PATH. Please install darktable."
             )
 
         return darktable_cli_path
@@ -206,7 +208,7 @@ class CLIWrapper:
         darktable_path = shutil.which("darktable")
         if not darktable_path:
             raise DarktableNotFoundError(
-                "darktable executable not found in PATH. " "Please install darktable."
+                "darktable executable not found in PATH. Please install darktable."
             )
 
         return darktable_path
@@ -220,6 +222,8 @@ class CLIWrapper:
         max_width: int | None = None,
         max_height: int | None = None,
         timeout: int = EXPORT_TIMEOUT_DEFAULT,
+        xmp_path: Path | None = None,
+        configdir: Path | None = None,
     ) -> Path:
         """Export an image using darktable-cli.
 
@@ -247,6 +251,9 @@ class CLIWrapper:
             max_height: Maximum height in pixels, or None for unconstrained.
                 Passed to darktable-cli's `--height` flag.
             timeout: subprocess timeout in seconds (default 120 s).
+            xmp_path: Explicit variant sidecar; None uses CLI auto-discovery.
+            configdir: Optional dedicated config directory override. Calls sharing
+                a directory are serialized to protect the database.
 
         Returns:
             Path: The file darktable-cli actually wrote
@@ -259,6 +266,7 @@ class CLIWrapper:
             cmd = [
                 self.darktable_cli_path,
                 str(input_path),
+                *([str(xmp_path)] if xmp_path is not None else []),
                 str(written_path),
             ]
 
@@ -272,7 +280,11 @@ class CLIWrapper:
                 cmd.extend(["--height", str(max_height or 0)])
 
             # Everything after `--core` is handed to the darktable core.
-            cmd.extend(["--core", "--configdir", str(self._worker_configdir())])
+            export_configdir = (
+                Path(configdir) if configdir is not None else self._worker_configdir()
+            )
+            export_configdir.mkdir(parents=True, exist_ok=True)
+            cmd.extend(["--core", "--configdir", str(export_configdir)])
 
             fmt = format_type.lower()
             if fmt == "jpeg":
@@ -282,7 +294,13 @@ class CLIWrapper:
             elif fmt == "tiff":
                 cmd.extend(["--conf", "plugins/imageio/format/tiff/bpp=8"])
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            # Explicit overrides (including separate wrappers) may share a database.
+            with self._config_locks_guard:
+                config_lock = self._config_locks.setdefault(
+                    export_configdir.resolve(), threading.Lock()
+                )
+            with config_lock:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
             if result.returncode != 0:
                 error_msg = result.stderr or "Unknown error"
@@ -314,7 +332,7 @@ class CLIWrapper:
         except OSError:
             raise ExportError(
                 f"Export reported success but wrote no file at {output_path} "
-                f"(darktable-cli can exit 0 on an unsupported input)"
+                "(darktable-cli can exit 0 on an unsupported input)"
             )
 
         if size == 0:
@@ -377,6 +395,7 @@ class CLIWrapper:
         max_height: int | None = None,
         max_workers: int | None = None,
         timeout: int = EXPORT_TIMEOUT_DEFAULT,
+        xmp_paths: list[Path | None] | None = None,
     ) -> list[ExportResult]:
         """Export multiple images in batch, in parallel.
 
@@ -402,10 +421,14 @@ class CLIWrapper:
             max_workers: Thread pool size. Defaults to
                 `min(4, os.cpu_count() or 1)`.
             timeout: Per-file subprocess timeout in seconds.
+            xmp_paths: Optional sidecars aligned with input_files; None entries
+                retain automatic sidecar discovery.
 
         Returns:
             List[ExportResult]: One result per input, in input order.
         """
+        if xmp_paths is not None and len(xmp_paths) != len(input_files):
+            raise ValueError("xmp_paths must contain one entry per input file")
         if not input_files:
             return []
 
@@ -426,6 +449,7 @@ class CLIWrapper:
                     max_width=max_width,
                     max_height=max_height,
                     timeout=timeout,
+                    **({"xmp_path": xmp_paths[index]} if xmp_paths is not None else {}),
                 ): index
                 for index, (input_file, output_file) in enumerate(zip(input_files, planned))
             }
@@ -445,6 +469,7 @@ class CLIWrapper:
         max_width: int | None = None,
         max_height: int | None = None,
         timeout: int = EXPORT_TIMEOUT_DEFAULT,
+        xmp_path: Path | None = None,
     ) -> ExportResult:
         """Export a single file, converting any failure into an ExportResult.
 
@@ -471,6 +496,7 @@ class CLIWrapper:
                 max_width=max_width,
                 max_height=max_height,
                 timeout=timeout,
+                **({"xmp_path": xmp_path} if xmp_path is not None else {}),
             )
         except Exception as e:
             logger.error("Failed to export %s: %s", input_file, e)

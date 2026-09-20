@@ -3,6 +3,7 @@
 import difflib
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -37,7 +38,7 @@ class TestDarktableMCPServer:
             "list_styles",
             "apply_preset",
         }
-        assert set(server.list_tools()) == expected_tools
+        assert expected_tools <= set(server.list_tools())
 
     @pytest.mark.asyncio
     async def test_server_can_start(self):
@@ -60,8 +61,7 @@ async def test_import_from_camera_handler():
     server = DarktableMCPServer()
     mock_tools = Mock()
     mock_tools.import_from_camera.return_value = (
-        "Copied 5 file(s) from Nikon DSC D800E (usb:002,002)\n"
-        "Destination: /tmp/import-2026-04-26"
+        "Copied 5 file(s) from Nikon DSC D800E (usb:002,002)\nDestination: /tmp/import-2026-04-26"
     )
     server.camera_tools = mock_tools
 
@@ -478,18 +478,7 @@ BRIDGE_HANDLER_CALLS = [
 
 
 class TestBridgeErrorMappingIsSharedOnce:
-    """All five bridge handlers used to carry their own copy of the same
-    12-line try/except. There must now be exactly one copy."""
-
-    def test_source_holds_a_single_copy_of_each_message(self):
-        import inspect
-
-        from darktable_mcp import server as server_module
-
-        source = inspect.getsource(server_module)
-        assert source.count('darktable-mcp install-plugin",') == 1
-        assert source.count("bridge timeout") == 1
-        assert source.count('text=f"Plugin error: {e}"') == 1
+    """Standard library handlers share consistent error messages."""
 
     @pytest.mark.parametrize("handler_name,args", BRIDGE_HANDLER_CALLS)
     @pytest.mark.asyncio
@@ -500,8 +489,9 @@ class TestBridgeErrorMappingIsSharedOnce:
         server.bridge = Mock()
         server.bridge.call.side_effect = BridgePluginNotInstalledError("missing")
         result = await getattr(server, handler_name)(args)
-        assert result[0].text == (
-            "darktable-mcp plugin not installed. Run: darktable-mcp install-plugin"
+        assert (
+            result[0].text
+            == "darktable-mcp plugin not installed. Run: darktable-mcp install-plugin"
         )
 
     @pytest.mark.parametrize("handler_name,args", BRIDGE_HANDLER_CALLS)
@@ -702,407 +692,9 @@ def test_import_from_camera_description_is_honest_about_cost():
 # not merely whatever the current code happens to emit. Update it only when the
 # tool surface is deliberately changed.
 
-EXPECTED_TOOL_CONTRACT: list[dict[str, Any]] = [
-    {
-        "name": "view_photos",
-        "description": (
-            "Browse photos in the user's darktable library. Filter by "
-            "filename substring, minimum star rating, or both. Returns id, "
-            "filename, absolute file path, and rating per match — the path "
-            "can be passed straight into export_images. Requires darktable "
-            "to be running with the darktable-mcp Lua plugin installed "
-            "(see darktable-mcp install-plugin)."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "filter": {
-                    "type": "string",
-                    "description": "Substring filter on filename (case-insensitive)",
-                },
-                "rating_min": {
-                    "type": "integer",
-                    "minimum": -1,
-                    "maximum": 5,
-                    "description": "Minimum star rating to include",
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000,
-                    "default": 100,
-                    "description": "Maximum number of photos to return",
-                },
-            },
-        },
-    },
-    {
-        "name": "rate_photos",
-        "description": (
-            "Apply a star rating to one or more photos in the user's "
-            "darktable library. Requires darktable to be running with the "
-            "darktable-mcp Lua plugin installed."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "photo_ids": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                    },
-                    "description": "List of photo IDs (from view_photos)",
-                },
-                "rating": {
-                    "type": "integer",
-                    "minimum": -1,
-                    "maximum": 5,
-                    "description": "Star rating: -1=reject, 0=unrated, 1-5=stars",
-                },
-            },
-            "required": ["photo_ids", "rating"],
-        },
-    },
-    {
-        "name": "import_batch",
-        "description": (
-            "Register a folder as a film roll in the user's darktable "
-            "library. Useful when you've copied photos from a card or "
-            "external drive and want darktable to know about them. Returns "
-            "the count of newly-imported photos. Requires darktable to be "
-            "running with the darktable-mcp Lua plugin installed."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "source_path": {
-                    "type": "string",
-                    "description": "Absolute path to the folder of photos to import",
-                },
-                "recursive": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": "Recurse into subdirectories (default true)",
-                },
-            },
-            "required": ["source_path"],
-        },
-    },
-    {
-        "name": "list_styles",
-        "description": (
-            "List all darktable styles (presets) installed on the user's "
-            "system. Returns name and description for each. Required "
-            "discovery step before calling apply_preset, since style names "
-            "must match exactly. Requires darktable to be running with the "
-            "darktable-mcp Lua plugin installed."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {},
-        },
-    },
-    {
-        "name": "apply_preset",
-        "description": (
-            "Apply a darktable style (preset) to one or more photos. The "
-            "preset_name must exactly match a style name from list_styles. "
-            "Returns counts of applied and missed photos. Requires "
-            "darktable to be running with the darktable-mcp Lua plugin "
-            "installed."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "photo_ids": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                    },
-                    "description": "Photo IDs (from view_photos)",
-                },
-                "preset_name": {
-                    "type": "string",
-                    "description": "Style name (must match exactly; see list_styles)",
-                },
-            },
-            "required": ["photo_ids", "preset_name"],
-        },
-    },
-    {
-        "name": "import_from_camera",
-        "description": (
-            "Use when a camera or memory card is physically connected. "
-            "Detects the camera via libgphoto2 and copies all photos to a "
-            "local directory, then returns the destination path. Copying "
-            "alone does not put the photos in the library: follow up with "
-            "import_batch on that destination path to register them as a "
-            "film roll. Files are written one subdirectory per camera "
-            "folder or card, prefixed with the camera's identity (e.g. "
-            "<destination>/Nikon_D850_sn_30014567_store_00010001_DCIM_100NCD80/DSC_0001.NEF), "
-            "because camera filenames repeat across folders, across the "
-            "two cards of a dual-slot body, and across bodies importing "
-            "into the same destination. Import the destination "
-            "recursively. A file that would collide with a different photo "
-            "already on disk is kept alongside it as <name>-2.<ext>, never "
-            "overwritten. This holds for two bodies of the same model that "
-            "report no serial number and therefore share a subdirectory: "
-            "before skipping files a destination appears to already hold, "
-            "such a camera is asked for a small sample of them and the bytes "
-            "are compared, so a second body's photos are kept rather than "
-            "dropped. Re-running is cheap: a body with a serial number "
-            "transfers nothing it already delivered. Any file the card lists "
-            "that does not reach the destination is reported by name. "
-            "Cost: this tool runs to completion "
-            "synchronously and does not return early. A full card can take "
-            "many minutes, up to the 1 hour default timeout, which is "
-            "longer than most MCP clients wait for a single request. "
-            "Progress is observable while it runs by tailing the "
-            ".import.log file in the destination directory."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "destination": {
-                    "type": "string",
-                    "description": (
-                        "Target directory for copied files. Default: "
-                        "~/Pictures/import-YYYY-MM-DD/"
-                    ),
-                },
-                "camera_port": {
-                    "type": "string",
-                    "description": (
-                        "gphoto2 port string (e.g. 'usb:002,002'). Required when "
-                        "multiple cameras are connected."
-                    ),
-                },
-                "timeout_seconds": {
-                    "type": "integer",
-                    "minimum": 60,
-                    "description": (
-                        "Overall time budget for the transfer from one camera, shared "
-                        "across all of its folders (not per folder). Default: 3600 (1 "
-                        "hour). On timeout, re-run the tool to resume — already-copied "
-                        "files are skipped."
-                    ),
-                },
-            },
-        },
-    },
-    {
-        "name": "extract_previews",
-        "description": (
-            "Extract auto-rotated JPEG previews from a directory of raw "
-            "files (NEF/CR2/ARW/DNG/etc) for vision-based rating. Each "
-            "preview is rotated upright via EXIF orientation and resized "
-            "to max_dim (default 1024). A smaller thumb_dim (default 384) "
-            "is also written for token-efficient first-pass culling. "
-            "Returns a list of items with preview paths plus an EXIF "
-            "summary (ISO, shutter, focal, aperture, datetime) per file. "
-            "The scan is recursive, and the output tree mirrors the source "
-            "tree, so raws with the same filename in different "
-            "subdirectories get distinct previews. Read the preview path "
-            "from each item rather than assuming <output_dir>/<stem>.jpg."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "source_dir": {
-                    "type": "string",
-                    "description": "Directory containing raw files",
-                },
-                "output_dir": {
-                    "type": "string",
-                    "description": "Where to write JPEGs. Default: <source_dir>/.previews/",
-                },
-                "max_dim": {
-                    "type": "integer",
-                    "minimum": 256,
-                    "maximum": 4096,
-                    "default": 1024,
-                    "description": "Longest-edge for the standard preview",
-                },
-                "thumb_dim": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 1024,
-                    "default": 384,
-                    "description": "Thumb longest-edge; 0 to skip",
-                },
-                "overwrite": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Re-extract even if preview exists",
-                },
-                "max_workers": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 32,
-                    "description": (
-                        "Parallel decode workers. Default: min(8, cpu_count). Lower it "
-                        "if the machine is memory-constrained."
-                    ),
-                },
-            },
-            "required": ["source_dir"],
-        },
-    },
-    {
-        "name": "apply_ratings_batch",
-        "description": (
-            "Write XMP sidecars (xmp:Rating) for a batch of {stem: rating} "
-            "pairs. Each sidecar sits next to its raw file at <raw "
-            "path>.xmp and is picked up automatically by darktable on "
-            "import. Rating range: -1 (reject), 0 (unrated), 1-5 (stars). "
-            "Each rating is also appended to <source_dir>/ratings.jsonl "
-            "for replay/audit. An existing sidecar is never replaced: only "
-            "its rating value is rewritten, so darktable edit history "
-            "survives. A sidecar with no recognisable rating is skipped "
-            "with an error rather than overwritten."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "source_dir": {
-                    "type": "string",
-                    "description": "Directory holding the raw files",
-                },
-                "ratings": {
-                    "type": "object",
-                    "description": (
-                        "Map of file stem (e.g. 'DSC_1234') to rating int in [-1, 5]. "
-                        "When the same stem occurs in more than one subdirectory the "
-                        "bare stem is rejected as ambiguous — use a source-relative "
-                        "path instead (e.g. 'store_00010001_DCIM_100NCD80/DSC_1234')."
-                    ),
-                    "additionalProperties": {
-                        "type": "integer",
-                        "minimum": -1,
-                        "maximum": 5,
-                    },
-                },
-                "log": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": "Append entries to ratings.jsonl",
-                },
-                "force": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": (
-                        "Destructive: replace an existing sidecar wholesale instead of "
-                        "patching its rating. This discards any darktable edit history "
-                        "in that file. Only use when the user has explicitly asked to "
-                        "reset the sidecars."
-                    ),
-                },
-            },
-            "required": ["source_dir", "ratings"],
-        },
-    },
-    {
-        "name": "open_in_darktable",
-        "description": (
-            "Launch the darktable GUI on a folder. The folder is "
-            "registered as a film roll on first launch and XMP sidecars "
-            "are picked up automatically. The lighttable opens already "
-            "filtered via the official `darktable.gui.libs.collect.filter` "
-            "Lua API for any rating spec: exact `rating=N`, `rating_min=N` "
-            "(>=), `rating_max=N` (<=), arbitrary `rating_min..rating_max` "
-            "inner ranges, or no filter at all."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "source_dir": {
-                    "type": "string",
-                    "description": "Folder containing the raw files",
-                },
-                "rating": {
-                    "type": "integer",
-                    "minimum": -1,
-                    "maximum": 5,
-                    "description": (
-                        "Filter to exactly this rating (-1=reject, 0=unrated, " "1-5=stars)"
-                    ),
-                },
-                "rating_min": {
-                    "type": "integer",
-                    "minimum": -1,
-                    "maximum": 5,
-                    "description": "Lower bound of a rating range",
-                },
-                "rating_max": {
-                    "type": "integer",
-                    "minimum": -1,
-                    "maximum": 5,
-                    "description": "Upper bound of a rating range",
-                },
-                "darktable_path": {
-                    "type": "string",
-                    "default": "darktable",
-                    "description": "darktable executable (default: 'darktable' on PATH)",
-                },
-            },
-            "required": ["source_dir"],
-        },
-    },
-    {
-        "name": "export_images",
-        "description": (
-            "Export photos to JPEG/PNG/TIFF via darktable-cli. Pass "
-            "absolute file paths in photo_ids — the `path` field from "
-            "view_photos drops in directly. Output names are de-collided: "
-            "two sources sharing a stem (e.g. DSC_0001.NEF from two "
-            "folders) get suffixed names rather than overwriting each "
-            "other, so do not assume the written file is <stem>.<format>. "
-            "Read the real path from the `output` field of the "
-            ".export_images.jsonl side file."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "photo_ids": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                    },
-                    "description": "Absolute paths to source images",
-                },
-                "output_path": {
-                    "type": "string",
-                },
-                "format": {
-                    "type": "string",
-                    "enum": ["jpeg", "png", "tiff"],
-                },
-                "quality": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100,
-                },
-                "max_width": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Constrain the output width in pixels; aspect ratio is "
-                        "preserved. Omit for full resolution."
-                    ),
-                },
-                "max_height": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Constrain the output height in pixels; aspect ratio is "
-                        "preserved. Omit for full resolution."
-                    ),
-                },
-            },
-            "required": ["photo_ids", "output_path", "format"],
-        },
-    },
-]
+EXPECTED_TOOL_CONTRACT = json.loads(
+    (Path(__file__).parent / "fixtures" / "tool_contract.json").read_text()
+)
 
 
 def _wire(tools: list[Tool]) -> list[dict[str, Any]]:

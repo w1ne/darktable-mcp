@@ -6,7 +6,7 @@ import sys
 
 from .server import DarktableMCPServer
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __author__ = "w1ne"
 __email__ = "14119286+w1ne@users.noreply.github.com"
 
@@ -17,11 +17,34 @@ def _run_server() -> None:
     """Run the MCP server over stdio (default subcommand / no-args behavior)."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Darktable MCP Server (stdio)")
+    parser = argparse.ArgumentParser(description="Darktable MCP Server")
     parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging",
+    )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help="Serve over Streamable HTTP instead of stdio (for remote/proxied access)",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "HTTP bind host (--http only). Default 127.0.0.1; bind to LAN IP behind a reverse proxy"
+        ),
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8787,
+        help="HTTP bind port (--http only). Default 8787",
+    )
+    parser.add_argument(
+        "--path",
+        default="/mcp",
+        help="HTTP mount path for the MCP endpoint (--http only). Default /mcp",
     )
     args = parser.parse_args()
 
@@ -31,7 +54,20 @@ def _run_server() -> None:
     )
 
     try:
-        asyncio.run(DarktableMCPServer().run())
+        if args.http:
+            import os
+
+            token = os.environ.get("DTMCP_BEARER_TOKEN") or None
+            asyncio.run(
+                DarktableMCPServer().run_http(
+                    host=args.host,
+                    port=args.port,
+                    path=args.path,
+                    bearer_token=token,
+                )
+            )
+        else:
+            asyncio.run(DarktableMCPServer().run())
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
     except Exception as e:
@@ -50,6 +86,10 @@ def main() -> None:
         from .cli.install_plugin import uninstall_main
 
         sys.exit(uninstall_main(args[1:]))
+    if args and args[0] == "install-sidecar":
+        from .cli.install_sidecar import install_sidecar_main
+
+        sys.exit(install_sidecar_main(args[1:]))
     _run_server()
 
 

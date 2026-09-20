@@ -36,6 +36,9 @@ dependencies = [
     # to mcp_types (Tool.inputSchema -> Tool.input_schema) and made handlers return
     # ListToolsResult / CallToolResult instead of bare lists.
     "mcp>=2,<3",
+    "opencv-python-headless>=4.9,<5",
+    "numpy>=1.24,<3",
+    "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]
@@ -64,7 +67,7 @@ darktable-mcp = "darktable_mcp:main"
 include = ["darktable_mcp*"]
 
 [tool.setuptools.package-data]
-darktable_mcp = ["lua/*.lua"]
+darktable_mcp = ["lua/*.lua", "sidecar_assets/*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "darktable_mcp.__version__"}

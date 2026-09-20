@@ -67,7 +67,18 @@ def _cache_dir() -> Path:
 
 
 def _plugin_path() -> Path:
+    """Legacy per-user plugin path (old `darktable-mcp install-plugin` CLI)."""
     return Path.home() / ".config" / "darktable" / "lua" / "darktable_mcp.lua"
+
+
+def _system_plugin_path() -> Path:
+    """System-wide plugin path baked in by the darktable-agentic .deb --
+    already on darktable's Lua package.path (see
+    packaging-deb/build-deb.sh), so a per-user copy/symlink is not required
+    for the plugin to be requireable at darktable startup. Checked as an
+    alternative to the legacy per-user path below, not a replacement for it,
+    so existing per-user installs (from the old CLI) keep working too."""
+    return Path("/usr/share/darktable/lua/darktable_mcp.lua")
 
 
 class Bridge:
@@ -107,9 +118,9 @@ class Bridge:
         """
         timeout = resolve_timeout(method, timeout)
 
-        if not self._plugin_path.is_file():
+        if not self._plugin_path.is_file() and not _system_plugin_path().is_file():
             raise BridgePluginNotInstalledError(
-                f"plugin not installed at {self._plugin_path}. " "Run: darktable-mcp install-plugin"
+                f"plugin not installed at {self._plugin_path}. Run: darktable-mcp install-plugin"
             )
 
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -157,7 +168,7 @@ class Bridge:
                 time.sleep(POLL_INTERVAL_SECONDS)
 
             raise BridgeTimeoutError(
-                f"method {method!r} got no plugin response within its " f"{timeout:g}s timeout"
+                f"method {method!r} got no plugin response within its {timeout:g}s timeout"
             )
         finally:
             # Best-effort cleanup of our own request file.

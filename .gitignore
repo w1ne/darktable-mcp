@@ -115,3 +115,7 @@ Thumbs.db
 
 # Git worktrees
 .worktrees/
+
+# Sidecar model checkpoints (downloaded via `darktable-mcp install-sidecar`)
+sidecar/checkpoints/
+sidecar/.venv/

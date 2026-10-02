@@ -1,57 +1,96 @@
-# Darktable MCP Server
+# darktable-mcp
 
-## Recovered editing tools
+An MCP server that lets Claude and other MCP clients work with your darktable library: browse and rate photos, import from a camera, apply styles, export, and (with a patched darktable) edit module parameters and masks in the darkroom. It is for photographers who use darktable and want to drive it by chatting with an AI assistant.
 
-This release integrates Roman Fordinal's `agentic-mcp` fork while retaining
-upstream's MCP 2.x transport, verified exports, collision-free output names,
-and asynchronous library operations. The server now exposes 54 tools.
+The AI runs in your MCP client (Claude Desktop, Claude Code, or any other client). This server only drives darktable, using `darktable-cli` and darktable's Lua API. It never reads or writes `library.db` directly.
 
-- Contact sheets, tags, notes and collections help review a photo library.
-- Module parameters, masks, retouch shapes, viewport controls and LUT comparisons
-  support editing and previewing the current darkroom image.
-- SAM2 segmentation and MODNet matting remain optional sidecar services;
-  segmentation also supports the existing local GrabCut fallback.
-- Streamable HTTP is available with `darktable-mcp --http` (localhost by default).
-  Set `DTMCP_BEARER_TOKEN` for authentication and `DTMCP_PUBLIC_URL` to the external
-  server origin if generated-file download links are needed. File URLs contain
-  an access token, so treat them as private links.
+## What you can do
 
-**Library operations work with the standard plugin. Live darkroom editing requires
-[the companion patched darktable](https://github.com/rfordinal/darktable-agentic/tree/agentic-mcp),
-which exposes `darktable.develop`.** The bridge reports this requirement when
-called on a stock build; installing this Python package does not patch darktable.
+- Cull a shoot: extract previews from raw files, let the model rate them, write XMP sidecars, then open the folder in darktable filtered by rating.
+- Work the library: search by filename and rating, tag, add notes, list collections, rate, apply styles (presets).
+- Pull photos off a camera over USB with `gphoto2`, without overwriting files that share a name.
+- Export JPEG, PNG or TIFF through `darktable-cli`, even while the darktable window is open.
+- Edit the image open in the darkroom: read and set module parameters, blend settings, masks, retouch shapes, and compare LUTs. This part needs the [patched darktable build](https://github.com/rfordinal/darktable-agentic/tree/agentic-mcp) and does not work on stock darktable.
 
-Install the Python server from this repository with `pip install -e .`, then run
-`darktable-mcp install-plugin`. Keep `[vision]` for RAW preview/rating tools.
-Use `darktable-mcp install-sidecar --help` for optional model installation.
-The [fork's detailed tool guide](docs/agentic-fork.md) describes the editing tools;
-its original deployment examples are historical, not this project's install commands.
+## Example prompts
 
-`view_photos` continues to browse the whole library by default; request
-`scope="collection"` for the open lighttable collection. For duplicate image
-versions, pass the reported `sidecar` paths through `export_images.xmp_paths`.
-Contact sheets also use each image's selected sidecar. Export details report
-actual output paths: do not infer filenames from input basenames.
+- "Show me everything in the library rated 3 stars or more from the last import and make a contact sheet."
+- "Extract previews from ~/Pictures/wedding, rate the sharp, well-exposed ones 4 and the rest 2, and open the 4s in darktable."
+- "Import the card from my camera into ~/Pictures/import-today and tell me if any files were skipped."
+- "Apply my 'film-warm' style to the selected photos, then export them as 2048px JPEGs to ~/Desktop/out."
+- "Open this image in the darkroom, lift the shadows a bit, and preview three different LUTs."
 
-GUI tool transactions are serialized so concurrent previews cannot overwrite
-another edit during restoration. Bridge calls and contact-sheet rendering run off the event
-loop, leaving the MCP connection responsive. Unit/transport tests exercise this
-integration; hardware camera and patched-darktable runtime validation are separate.
+## Install
 
+Requirements: Python 3.10 or newer, darktable 4.0 or newer with `darktable-cli` on your `PATH`, and an MCP client. Linux is the main target; macOS works except for camera import. The plugin installer writes to `~/.config/darktable/`, so Windows is not supported, and `gphoto2` (needed for camera import) has no Windows build.
 
-A Model Context Protocol (MCP) server that exposes darktable operations
-to MCP clients (Claude Desktop, Claude Code, etc.). The AI lives in the
-client; this server drives darktable.
+```bash
+pip install 'git+https://github.com/w1ne/darktable-mcp'
+# Optional: raw preview and sidecar rating tools (needs libraw and libexiv2)
+pip install 'darktable-mcp[vision] @ git+https://github.com/w1ne/darktable-mcp'
+
+# Install the Lua plugin into ~/.config/darktable/, then restart darktable
+darktable-mcp install-plugin
+```
+
+The package is not on PyPI yet. Leave darktable open while you use the library tools: they talk to the running instance through the plugin.
+
+### Claude Desktop
+
+Add this to `claude_desktop_config.json` and restart Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "darktable": {
+      "command": "darktable-mcp"
+    }
+  }
+}
+```
+
+The file lives at `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS and `~/.config/Claude/claude_desktop_config.json` on Linux.
+
+### Claude Code
+
+```bash
+claude mcp add darktable -- darktable-mcp
+```
+
+### Other MCP clients
+
+Any client that can launch a stdio server can run the `darktable-mcp` command. For clients that only speak HTTP, run `darktable-mcp --http` (Streamable HTTP on `127.0.0.1:8787/mcp` by default; change with `--host`, `--port`, `--path`). Set `DTMCP_BEARER_TOKEN` to require a token. Set `DTMCP_PUBLIC_URL` to the external origin if you need download links for generated files; those links contain an access token, so treat them as private.
 
 ## Tools
 
-**Library operations** (require `darktable-mcp install-plugin` and an open darktable session):
+The server exposes 54 tools. The main groups:
 
-- `view_photos(filter?, rating_min?, limit?)` — Browse the library by filename substring and minimum rating. Returns id, filename, **absolute file path**, and rating per match — the path drops straight into `export_images`'s `photo_ids`.
-- `rate_photos(photo_ids, rating)` — Apply -1..5 star ratings (-1 = reject, 0 = unrated).
-- `import_batch(source_path, recursive?)` — Register a folder as a film roll. `recursive=true` is honoured in Lua by walking the tree and importing each directory, so it works regardless of darktable's `recurse_directories` preference. `recursive=false` cannot *stop* darktable recursing, so the response says so (`recursive_honoured: false`) rather than claiming a mode it did not deliver. If darktable's background scan has not settled when the plugin answers, the count is reported as a floor, not a total.
-- `list_styles()` — Enumerate installed darktable styles (presets), returning name + description per entry.
-- `apply_preset(photo_ids, preset_name)` — Apply a named darktable style to one or more photos. Use `list_styles` first to discover exact names.
+| Group | Tools |
+|---|---|
+| Library | `view_photos`, `get_contact_sheet`, `rate_photos`, `tag_photo`, `set_photo_note`, `get_photo_note`, `list_collections`, `list_photos_in_collection`, `import_batch`, `list_styles`, `apply_preset` |
+| Camera and previews | `import_from_camera`, `extract_previews`, `apply_ratings_batch`, `open_in_darktable` |
+| Export | `export_images` |
+| Darkroom editing (patched darktable) | `open_image_in_darkroom`, `navigate_photo`, `get_current_image`, `list_modules`, `get_params`, `set_params`, `enable_module`, `add_instance`, `get_blend_params`, `set_blend_params` |
+| Masks and retouch (patched darktable) | `list_masks`, `get_module_mask`, `get_mask_geometry`, `attach_mask`, `detach_mask`, `set_module_mask`, `add_path_mask`, `retouch_add_shape`, `retouch_list_shapes`, `mask_object`, `mask_raster`, and related |
+| Preview and LUTs (patched darktable) | `get_viewport`, `set_viewport`, `get_preview`, `capture_viewport`, `list_luts`, `preview_lut`, `compare_luts` |
+
+Subject segmentation (`mask_object`) uses SAM2 and MODNet through optional sidecar services, with a local GrabCut fallback for segmentation. See `darktable-mcp install-sidecar --help` and [docs/install/INSTALL-sidecar.md](docs/install/INSTALL-sidecar.md). The [editing tool guide](docs/agentic-fork.md) covers the darkroom tools in more detail.
+
+`view_photos` browses the whole library by default; pass `scope="collection"` for the open lighttable collection. For duplicate versions of an image, pass the reported `sidecar` paths to `export_images` via `xmp_paths`. Export results report the real output paths, so do not infer filenames from input names.
+
+## Troubleshooting
+
+- **Library tools time out or say the bridge is not running.** darktable must be open, the plugin must be installed with `darktable-mcp install-plugin`, and darktable must have been restarted after that.
+- **Darkroom tools report a missing `darktable.develop`.** You are on a stock darktable. Those tools need the [patched build](https://github.com/rfordinal/darktable-agentic/tree/agentic-mcp). Library, export and rating tools work on stock darktable.
+- **Exported files have no edits.** Export reads edits from XMP sidecars. Turn on "write sidecar file for each image" in darktable's preferences.
+- **A rating written by `apply_ratings_batch` does not show in darktable.** For photos already in the library, darktable trusts its database over the sidecar. In the lighttable, use "selected image(s) > read sidecar files".
+- **`pip install` of the `[vision]` extra fails.** Install the system libraries `libraw` and `libexiv2` first.
+- **Camera import finds nothing.** Install `gphoto2`, close anything else holding the camera (file managers often do), and check that the camera is in PTP or mass-storage mode.
+- **`mcp` version errors.** This server needs `mcp>=2,<3`; 1.x does not work.
+
+Run with `darktable-mcp --debug` for more logging.
+
+## Tool details
 
 **Camera ingest** (headless):
 
@@ -105,49 +144,7 @@ The tool used to report a phantom pid in both cases. Detection reads what darkta
 
   **Sidecar caveat:** because the config dir is isolated from the GUI's, exports read develop settings from XMP sidecars only. If darktable's *write sidecar file for each image* preference is off, files export **without their edits** and darktable-cli still reports success.
 
-## Design rules
-
-Use only the official darktable APIs: `darktable-cli` for export, the Lua API for everything else. No direct `library.db` reads or writes. Tools that return data to the AI must be headless; the GUI may launch only when the tool's purpose is to show the human something.
-
-## Why some tools are parked
-
-`darktable-cli` doesn't load the user's library and `darktable --lua` brings up the full GUI, so there's no headless one-shot path for library reads/writes. Iteration 2 (spec: `docs/superpowers/specs/2026-04-27-ipc-bridge-mvp-design.md`) shipped a long-running Lua plugin loaded into the user's interactive darktable session, with a file-based JSON RPC bridge. The library tools (`view_photos`, `rate_photos`, `import_batch`, `list_styles`, `apply_preset`) all ride on it.
-
-`adjust_exposure` was retired during iteration 3 — see `docs/superpowers/specs/2026-04-28-iter3-design.md`. The darktable Lua API in 9.6.0 exposes neither `image.modules` nor `image.history`, and `dt.gui.action` requires an active darkroom view (single-image, GUI-driven). The realistic future paths (pre-created `.dtstyle` exposure presets + `apply_preset`, or `darktable-cli --style` for export-only) are workable but not "set +N EV from Lua" tools.
-
-## Installation
-
-Not on PyPI yet — install from the repository:
-
-```bash
-pip install 'git+https://github.com/w1ne/darktable-mcp'
-# Optional: vision-rating workflow extras
-pip install 'darktable-mcp[vision] @ git+https://github.com/w1ne/darktable-mcp'
-# Install the Lua plugin into ~/.config/darktable/, then restart darktable
-darktable-mcp install-plugin
-```
-
-You also need `darktable` (with `darktable-cli`) on `PATH`. The `[vision]` extra pulls in `rawpy`, `Pillow`, and `pyexiv2`, which need system `libraw` and `libexiv2`.
-
-## Configuration
-
-Add to your Claude Desktop config:
-
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-- Linux: `~/.config/Claude/claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "darktable": {
-      "command": "darktable-mcp"
-    }
-  }
-}
-```
-
-## Vision-rating workflow
+### Vision-rating workflow
 
 When darktable's library doesn't yet know about your shoot — typically straight off a card — you can rate by vision before any import:
 
@@ -157,16 +154,21 @@ When darktable's library doesn't yet know about your shoot — typically straigh
 
 No SQLite poking, no half-imported state, no GUI launch until step 3.
 
-## Requirements
+## Design rules
 
-- Python 3.10+ (the floor comes from `mcp`, which requires 3.10)
-- darktable 4.0+ (with `darktable-cli` on `PATH`)
-- An MCP-compatible client (Claude Desktop, Claude Code, etc.)
-- Linux, or macOS for the parts that don't need `gphoto2`. The plugin installer writes to `~/.config/darktable/`, which is where darktable keeps its config on Linux and macOS but **not** on Windows — `import_from_camera` also needs `gphoto2`, which has no Windows build.
+Use only the official darktable APIs: `darktable-cli` for export, the Lua API for everything else. No direct `library.db` reads or writes. Tools that return data to the AI must be headless; the GUI may launch only when the tool's purpose is to show the human something.
 
-The MCP SDK is pinned to `mcp>=2,<3`. Tools are registered through the mcp 2.x low-level `Server(on_list_tools=…, on_call_tool=…)` handlers; the 1.x decorators this server used before do not exist in 2.x, so **mcp 1.x cannot run this code**.
+## Why the library tools need a plugin
 
-The low-level API is deliberate. The high-level `MCPServer` derives each `inputSchema` from the handler signature, which cannot express `additionalProperties: {type: integer, minimum: -1, maximum: 5}` — the rating bounds on `apply_ratings_batch` silently disappear — and it injects a `title` into every property. The tool schemas here are handwritten and pinned by a golden-snapshot test, because their descriptions are what the calling model reads to decide behaviour.
+`darktable-cli` doesn't load the user's library and `darktable --lua` brings up the full GUI, so there's no headless one-shot path for library reads/writes. Iteration 2 (spec: `docs/superpowers/specs/2026-04-27-ipc-bridge-mvp-design.md`) shipped a long-running Lua plugin loaded into the user's interactive darktable session, with a file-based JSON RPC bridge. The library tools (`view_photos`, `rate_photos`, `import_batch`, `list_styles`, `apply_preset`) all ride on it.
+
+`adjust_exposure` was retired during iteration 3 — see `docs/superpowers/specs/2026-04-28-iter3-design.md`. The darktable Lua API in 9.6.0 exposes neither `image.modules` nor `image.history`, and `dt.gui.action` requires an active darkroom view (single-image, GUI-driven). The realistic future paths (pre-created `.dtstyle` exposure presets + `apply_preset`, or `darktable-cli --style` for export-only) are workable but not "set +N EV from Lua" tools.
+
+## Notes on the MCP SDK
+
+The SDK is pinned to `mcp>=2,<3`. Tools are registered through the mcp 2.x low-level `Server(on_list_tools=..., on_call_tool=...)` handlers. The tool schemas are handwritten and pinned by a golden-snapshot test, because the high-level API cannot express some of the bounds (for example the rating range on `apply_ratings_batch`), and the descriptions are what the calling model reads.
+
+The editing tools build on Roman Fordinal's `agentic-mcp` fork; see [NOTICE.md](NOTICE.md). Unit and transport tests cover the integration; hardware camera and patched-darktable runtime checks are separate.
 
 ## Contributing
 
@@ -174,4 +176,4 @@ Contributions welcome. Any change that reads or writes `library.db` directly wil
 
 ## License
 
-MIT — see `LICENSE`.
+MIT, see `LICENSE`.
